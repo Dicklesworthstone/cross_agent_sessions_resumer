@@ -208,6 +208,7 @@ export CLAUDE_HOME="$HOME/.claude"
 export CODEX_HOME="$HOME/.codex"
 export GEMINI_HOME="$HOME/.gemini"
 export CURSOR_HOME="$HOME/.config/Cursor"
+export OPENCODE_HOME="$HOME/.opencode"
 
 # Logging verbosity (alternative to --verbose / --trace)
 export RUST_LOG="casr=debug"
