@@ -3,6 +3,7 @@
 //! Each AI coding agent (Claude Code, Codex, Gemini CLI, Cursor) implements the
 //! [`Provider`] trait to read/write sessions in its native format.
 
+pub mod aider;
 pub mod claude_code;
 pub mod codex;
 pub mod cursor;

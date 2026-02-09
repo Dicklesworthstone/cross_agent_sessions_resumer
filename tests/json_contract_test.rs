@@ -231,8 +231,8 @@ fn contract_providers_json_shape() {
         .expect("providers --json should be an array");
     assert_eq!(
         arr.len(),
-        4,
-        "should list 4 providers (CC, Codex, Gemini, Cursor)"
+        5,
+        "should list 5 providers (CC, Codex, Gemini, Cursor, Aider)"
     );
 
     for (i, item) in arr.iter().enumerate() {
@@ -287,6 +287,7 @@ fn contract_providers_aliases_match_slugs() {
             "codex" => assert_eq!(*alias, "cod"),
             "gemini" => assert_eq!(*alias, "gmi"),
             "cursor" => assert_eq!(*alias, "cur"),
+            "aider" => assert_eq!(*alias, "aid"),
             other => panic!("Unexpected slug: {other}"),
         }
     }
