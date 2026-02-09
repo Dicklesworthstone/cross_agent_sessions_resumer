@@ -45,7 +45,7 @@ struct Cli {
 enum Command {
     /// Convert and resume a session from another provider.
     Resume {
-        /// Target provider alias (cc, cod, gmi, cur, aid).
+        /// Target provider alias (cc, cod, gmi, cur, aid, opc).
         target: String,
         /// Session ID to convert.
         session_id: String,
@@ -328,7 +328,12 @@ fn cmd_list(provider_filter: Option<&str>, limit: usize, json_mode: bool) -> any
                 let ext = path.extension().and_then(|e| e.to_str());
                 if !matches!(
                     ext,
-                    Some("jsonl") | Some("json") | Some("vscdb") | Some("md")
+                    Some("jsonl")
+                        | Some("json")
+                        | Some("vscdb")
+                        | Some("md")
+                        | Some("db")
+                        | Some("sqlite")
                 ) {
                     continue;
                 }
