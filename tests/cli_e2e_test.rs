@@ -2,7 +2,7 @@
 //!
 //! Uses `assert_cmd` to invoke the compiled binary and validate output.
 //! All tests use temp directories with env overrides (`CLAUDE_HOME`,
-//! `CODEX_HOME`, `GEMINI_HOME`, `CURSOR_HOME`) so they never touch real provider data.
+//! `CODEX_HOME`, `GEMINI_HOME`, `CURSOR_HOME`, `OPENCODE_HOME`) so they never touch real provider data.
 
 use std::fs;
 use std::path::PathBuf;
@@ -18,7 +18,7 @@ fn fixtures_dir() -> PathBuf {
 
 /// Build a `Command` for the casr binary with isolated provider homes.
 ///
-/// Sets `CLAUDE_HOME`, `CODEX_HOME`, `GEMINI_HOME`, `CURSOR_HOME` to subdirs of the
+/// Sets `CLAUDE_HOME`, `CODEX_HOME`, `GEMINI_HOME`, `CURSOR_HOME`, `OPENCODE_HOME` to subdirs of the
 /// provided temp dir so the CLI never touches real provider data.
 fn casr_cmd(tmp: &TempDir) -> Command {
     #[allow(deprecated)]
@@ -27,6 +27,7 @@ fn casr_cmd(tmp: &TempDir) -> Command {
         .env("CODEX_HOME", tmp.path().join("codex"))
         .env("GEMINI_HOME", tmp.path().join("gemini"))
         .env("CURSOR_HOME", tmp.path().join("cursor"))
+        .env("OPENCODE_HOME", tmp.path().join("opencode"))
         // Suppress colored output in tests.
         .env("NO_COLOR", "1");
     cmd
@@ -181,7 +182,8 @@ fn cli_providers_succeeds() {
         .stdout(predicate::str::contains("Claude Code"))
         .stdout(predicate::str::contains("Codex"))
         .stdout(predicate::str::contains("Gemini"))
-        .stdout(predicate::str::contains("Cursor"));
+        .stdout(predicate::str::contains("Cursor"))
+        .stdout(predicate::str::contains("OpenCode"));
 }
 
 #[test]
@@ -508,6 +510,65 @@ fn cli_resume_cursor_to_cc_works_with_source_hint() {
         .success()
         .stdout(predicate::str::contains("Converted"))
         .stdout(predicate::str::contains("cursor"))
+        .stdout(predicate::str::contains("claude-code"));
+}
+
+#[test]
+fn cli_resume_cc_to_opencode_works_and_is_discoverable() {
+    let tmp = TempDir::new().unwrap();
+    let session_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "resume", "opc", &session_id])
+        .output()
+        .expect("resume should run");
+    assert!(
+        output.status.success(),
+        "CC→OpenCode conversion should succeed"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("resume --json output should parse");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["target_provider"].as_str().unwrap(), "opencode");
+    let opencode_session_id = parsed["target_session_id"]
+        .as_str()
+        .expect("target_session_id should be present for non-dry-run");
+
+    let opencode_db = tmp.path().join("opencode/opencode.db");
+    assert!(
+        opencode_db.exists(),
+        "OpenCode DB should exist after CC→OpenCode conversion"
+    );
+
+    casr_cmd(&tmp)
+        .args(["--json", "info", opencode_session_id])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cli_resume_opencode_to_cc_works_with_source_hint() {
+    let tmp = TempDir::new().unwrap();
+    let source_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let opencode_result = casr_cmd(&tmp)
+        .args(["--json", "resume", "opc", &source_id])
+        .output()
+        .expect("CC→OpenCode seed conversion should run");
+    assert!(opencode_result.status.success());
+    let opencode_json: serde_json::Value =
+        serde_json::from_slice(&opencode_result.stdout).expect("seed conversion JSON should parse");
+    let opencode_session_id = opencode_json["target_session_id"]
+        .as_str()
+        .expect("opencode target_session_id should be present");
+
+    casr_cmd(&tmp)
+        .args(["resume", "cc", opencode_session_id, "--source", "opc"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Converted"))
+        .stdout(predicate::str::contains("opencode"))
         .stdout(predicate::str::contains("claude-code"));
 }
 

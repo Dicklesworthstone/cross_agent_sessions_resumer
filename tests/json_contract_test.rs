@@ -28,6 +28,7 @@ fn casr_cmd(tmp: &TempDir) -> Command {
         .env("CODEX_HOME", tmp.path().join("codex"))
         .env("GEMINI_HOME", tmp.path().join("gemini"))
         .env("CURSOR_HOME", tmp.path().join("cursor"))
+        .env("OPENCODE_HOME", tmp.path().join("opencode"))
         .env("NO_COLOR", "1");
     cmd
 }
@@ -231,8 +232,8 @@ fn contract_providers_json_shape() {
         .expect("providers --json should be an array");
     assert_eq!(
         arr.len(),
-        5,
-        "should list 5 providers (CC, Codex, Gemini, Cursor, Aider)"
+        6,
+        "should list 6 providers (CC, Codex, Gemini, Cursor, Aider, OpenCode)"
     );
 
     for (i, item) in arr.iter().enumerate() {
@@ -261,6 +262,8 @@ fn contract_providers_known_slugs() {
     assert!(slugs.contains(&"codex"), "should contain codex");
     assert!(slugs.contains(&"gemini"), "should contain gemini");
     assert!(slugs.contains(&"cursor"), "should contain cursor");
+    assert!(slugs.contains(&"aider"), "should contain aider");
+    assert!(slugs.contains(&"opencode"), "should contain opencode");
 }
 
 #[test]
@@ -288,6 +291,7 @@ fn contract_providers_aliases_match_slugs() {
             "gemini" => assert_eq!(*alias, "gmi"),
             "cursor" => assert_eq!(*alias, "cur"),
             "aider" => assert_eq!(*alias, "aid"),
+            "opencode" => assert_eq!(*alias, "opc"),
             other => panic!("Unexpected slug: {other}"),
         }
     }
@@ -903,7 +907,14 @@ fn contract_list_provider_field_matches_slug() {
     let parsed: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
 
-    let valid_slugs = ["claude-code", "codex", "gemini", "cursor"];
+    let valid_slugs = [
+        "claude-code",
+        "codex",
+        "gemini",
+        "cursor",
+        "aider",
+        "opencode",
+    ];
     for item in parsed.as_array().unwrap() {
         let provider = item["provider"].as_str().unwrap();
         assert!(

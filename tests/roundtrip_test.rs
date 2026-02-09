@@ -28,6 +28,7 @@ use casr::providers::claude_code::ClaudeCode;
 use casr::providers::codex::Codex;
 use casr::providers::cursor::Cursor;
 use casr::providers::gemini::Gemini;
+use casr::providers::opencode::OpenCode;
 use casr::providers::{Provider, WriteOptions};
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,7 @@ static CC_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static CODEX_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static GEMINI_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static CURSOR_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static OPENCODE_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 struct EnvGuard {
     key: &'static str,
@@ -271,7 +273,67 @@ fn roundtrip_cursor_to_cc() {
 }
 
 // ===========================================================================
-// Path 5: Codex → CC
+// Path 5: CC → OpenCode
+// ===========================================================================
+
+#[test]
+fn roundtrip_cc_to_opencode() {
+    let _lock = OPENCODE_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("OPENCODE_HOME", tmp.path());
+
+    let original = read_cc_fixture("cc_simple");
+    let written = OpenCode
+        .write_session(&original, &WriteOptions { force: false })
+        .expect("CC→Opc: write should succeed");
+
+    let readback = OpenCode
+        .read_session(&written.paths[0])
+        .expect("CC→Opc: read-back should succeed");
+
+    assert_roundtrip_fidelity(&original, &readback, "CC→Opc");
+    assert_new_session_id(&readback, "CC→Opc");
+}
+
+// ===========================================================================
+// Path 6: OpenCode → CC
+// ===========================================================================
+
+#[test]
+fn roundtrip_opencode_to_cc() {
+    let opencode_canonical = {
+        let _opencode_lock = OPENCODE_ENV.lock().unwrap();
+        let opencode_tmp = tempfile::TempDir::new().unwrap();
+        let _opencode_env = EnvGuard::set("OPENCODE_HOME", opencode_tmp.path());
+
+        let seed = read_cc_fixture("cc_simple");
+        let written_opencode = OpenCode
+            .write_session(&seed, &WriteOptions { force: false })
+            .expect("seed CC→Opc write should succeed");
+
+        OpenCode
+            .read_session(&written_opencode.paths[0])
+            .expect("seed Opc read-back should succeed")
+    };
+
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let cc_tmp = tempfile::TempDir::new().unwrap();
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", cc_tmp.path());
+
+    let written_cc = ClaudeCode
+        .write_session(&opencode_canonical, &WriteOptions { force: false })
+        .expect("Opc→CC: write should succeed");
+
+    let readback_cc = ClaudeCode
+        .read_session(&written_cc.paths[0])
+        .expect("Opc→CC: read-back should succeed");
+
+    assert_roundtrip_fidelity(&opencode_canonical, &readback_cc, "Opc→CC");
+    assert_new_session_id(&readback_cc, "Opc→CC");
+}
+
+// ===========================================================================
+// Path 7: Codex → CC
 // ===========================================================================
 
 #[test]
