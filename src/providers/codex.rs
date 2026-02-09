@@ -1,7 +1,7 @@
 //! Codex provider — reads/writes JSONL sessions under `~/.codex/sessions/`.
 //!
 //! Session files: `YYYY/MM/DD/rollout-N.jsonl`
-//! Resume command: `codex --resume <session-id>`
+//! Resume command: `codex resume <session-id>`
 //!
 //! ## JSONL format (modern envelope)
 //!
@@ -20,7 +20,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use walkdir::WalkDir;
 
 use crate::discovery::DetectionResult;
@@ -201,15 +201,239 @@ impl Provider for Codex {
 
     fn write_session(
         &self,
-        _session: &CanonicalSession,
-        _opts: &WriteOptions,
+        session: &CanonicalSession,
+        opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        todo!("bd-1a2.2: Codex writer")
+        let target_session_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+        let now_epoch: f64 =
+            now.timestamp() as f64 + f64::from(now.timestamp_subsec_millis()) / 1000.0;
+
+        let sessions_dir = Self::sessions_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine Codex sessions directory"))?;
+        let target_path = rollout_path(&sessions_dir, &target_session_id, &now);
+
+        debug!(
+            target_session_id,
+            target_path = %target_path.display(),
+            "writing Codex session"
+        );
+
+        let mut lines: Vec<String> = Vec::with_capacity(session.messages.len() + 1);
+
+        // 1. session_meta line.
+        let cwd = session
+            .workspace
+            .as_deref()
+            .unwrap_or(std::path::Path::new("/tmp"))
+            .to_string_lossy()
+            .to_string();
+
+        lines.push(serde_json::to_string(&serde_json::json!({
+            "type": "session_meta",
+            "timestamp": now_epoch,
+            "payload": {
+                "id": target_session_id,
+                "cwd": cwd,
+            }
+        }))?);
+
+        // 2. Messages.
+        for msg in &session.messages {
+            let msg_ts: f64 = msg
+                .timestamp
+                .map(|ts| ts as f64 / 1000.0)
+                .unwrap_or(now_epoch);
+
+            for event in codex_events_for_message(msg, msg_ts) {
+                lines.push(serde_json::to_string(&event)?);
+            }
+        }
+
+        let content_bytes = lines.join("\n").into_bytes();
+
+        let outcome = crate::pipeline::atomic_write(&target_path, &content_bytes, opts.force)?;
+
+        info!(
+            target_session_id,
+            path = %outcome.target_path.display(),
+            messages = session.messages.len(),
+            "Codex session written"
+        );
+
+        Ok(WrittenSession {
+            paths: vec![outcome.target_path],
+            session_id: target_session_id.clone(),
+            resume_command: self.resume_command(&target_session_id),
+            backup_path: outcome.backup_path,
+        })
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("codex --resume {session_id}")
+        format!("codex resume {session_id}")
     }
+}
+
+fn codex_events_for_message(msg: &CanonicalMessage, msg_ts: f64) -> Vec<serde_json::Value> {
+    match msg.role {
+        MessageRole::User => vec![serde_json::json!({
+            "type": "event_msg",
+            "timestamp": msg_ts,
+            "payload": {
+                "type": "user_message",
+                "message": msg.content,
+            }
+        })],
+        MessageRole::Assistant if msg.author.as_deref() == Some("reasoning") => {
+            vec![serde_json::json!({
+                "type": "event_msg",
+                "timestamp": msg_ts,
+                "payload": {
+                    "type": "agent_reasoning",
+                    "text": msg.content,
+                }
+            })]
+        }
+        MessageRole::Assistant
+        | MessageRole::Tool
+        | MessageRole::System
+        | MessageRole::Other(_) => {
+            let mut events = vec![serde_json::json!({
+                "type": "response_item",
+                "timestamp": msg_ts,
+                "payload": {
+                    "role": codex_role_string(&msg.role),
+                    "content": codex_response_content(msg),
+                }
+            })];
+
+            if let Some(info) = codex_token_count_info(&msg.extra) {
+                events.push(serde_json::json!({
+                    "type": "event_msg",
+                    "timestamp": msg_ts,
+                    "payload": {
+                        "type": "token_count",
+                        "info": info,
+                    }
+                }));
+            }
+
+            events
+        }
+    }
+}
+
+fn codex_role_string(role: &MessageRole) -> String {
+    match role {
+        MessageRole::User => "user".to_string(),
+        MessageRole::Assistant => "assistant".to_string(),
+        MessageRole::Tool => "tool".to_string(),
+        MessageRole::System => "system".to_string(),
+        MessageRole::Other(other) => other.clone(),
+    }
+}
+
+fn codex_response_content(msg: &CanonicalMessage) -> serde_json::Value {
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
+
+    if !msg.content.is_empty() {
+        blocks.push(serde_json::json!({
+            "type": "input_text",
+            "text": msg.content,
+        }));
+    }
+
+    for tc in &msg.tool_calls {
+        blocks.push(serde_json::json!({
+            "type": "tool_use",
+            "id": tc.id.as_deref().unwrap_or(""),
+            "name": tc.name,
+            "input": tc.arguments,
+        }));
+    }
+
+    for tr in &msg.tool_results {
+        blocks.push(serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": tr.call_id.as_deref().unwrap_or(""),
+            "content": tr.content,
+            "is_error": tr.is_error,
+        }));
+    }
+
+    // Avoid empty response payloads in provider-native output.
+    if blocks.is_empty() {
+        blocks.push(serde_json::json!({
+            "type": "input_text",
+            "text": msg.content,
+        }));
+    }
+
+    serde_json::Value::Array(blocks)
+}
+
+fn codex_token_count_info(extra: &serde_json::Value) -> Option<serde_json::Value> {
+    let mut sources: Vec<&serde_json::Value> = Vec::new();
+    sources.push(extra);
+    if let Some(payload) = extra.get("payload") {
+        sources.push(payload);
+    }
+
+    let mut candidates: Vec<&serde_json::Value> = Vec::new();
+    for source in sources {
+        if let Some(usage) = source.get("usage") {
+            candidates.push(usage);
+        }
+        if let Some(token_count) = source.get("token_count") {
+            if let Some(info) = token_count.get("info") {
+                candidates.push(info);
+            }
+            candidates.push(token_count);
+        }
+        candidates.push(source);
+    }
+
+    for candidate in candidates {
+        let Some(obj) = candidate.as_object() else {
+            continue;
+        };
+
+        let mut info = serde_json::Map::new();
+        insert_token_count(&mut info, obj, "input_tokens", "inputTokens");
+        insert_token_count(&mut info, obj, "output_tokens", "outputTokens");
+        insert_token_count(&mut info, obj, "total_tokens", "totalTokens");
+        insert_token_count(&mut info, obj, "cached_input_tokens", "cachedInputTokens");
+        insert_token_count(&mut info, obj, "reasoning_tokens", "reasoningTokens");
+
+        if !info.is_empty() {
+            return Some(serde_json::Value::Object(info));
+        }
+    }
+
+    None
+}
+
+fn insert_token_count(
+    out: &mut serde_json::Map<String, serde_json::Value>,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    snake: &str,
+    camel: &str,
+) {
+    if let Some(value) = obj.get(snake).or_else(|| obj.get(camel))
+        && let Some(num) = token_count_number(value)
+    {
+        out.insert(snake.to_string(), serde_json::Value::Number(num.into()));
+    }
+}
+
+fn token_count_number(value: &serde_json::Value) -> Option<i64> {
+    if let Some(i) = value.as_i64() {
+        return Some(i);
+    }
+    if let Some(u) = value.as_u64() {
+        return i64::try_from(u).ok();
+    }
+    value.as_str().and_then(|s| s.parse::<i64>().ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -283,13 +507,16 @@ impl Codex {
 
                         let content_val = p.get("content");
                         let text = content_val.map(flatten_content).unwrap_or_default();
-                        if text.trim().is_empty() {
+                        let tool_calls = codex_extract_tool_calls(content_val);
+                        let tool_results = codex_extract_tool_results(content_val);
+
+                        if text.trim().is_empty()
+                            && tool_calls.is_empty()
+                            && tool_results.is_empty()
+                        {
                             trace!(line = line_num, "skipping empty response_item");
                             continue;
                         }
-
-                        let tool_calls = codex_extract_tool_calls(content_val);
-                        let tool_results = codex_extract_tool_results(content_val);
 
                         messages.push(CanonicalMessage {
                             idx: 0,
@@ -574,9 +801,13 @@ fn session_meta_id(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::rollout_path;
+    use super::{Codex, codex_events_for_message, rollout_path};
     use chrono::{TimeZone, Utc};
+    use serde_json::json;
     use std::path::Path;
+
+    use crate::model::{CanonicalMessage, MessageRole, ToolCall, ToolResult};
+    use crate::providers::Provider;
 
     #[test]
     fn rollout_path_includes_date_hierarchy_and_uuid_suffix() {
@@ -596,5 +827,319 @@ mod tests {
             ),
             "{path_str}"
         );
+    }
+
+    #[test]
+    fn assistant_events_include_tool_calls_results_and_token_count() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::Assistant,
+            content: "Applied the patch".to_string(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![ToolCall {
+                id: Some("call-1".to_string()),
+                name: "apply_patch".to_string(),
+                arguments: json!({"path":"src/providers/codex.rs"}),
+            }],
+            tool_results: vec![ToolResult {
+                call_id: Some("call-1".to_string()),
+                content: "ok".to_string(),
+                is_error: false,
+            }],
+            extra: json!({
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 22,
+                    "total_tokens": 33
+                }
+            }),
+        };
+
+        let events = codex_events_for_message(&msg, 1_700_000_000.0);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["type"], "response_item");
+        let content_blocks = events[0]["payload"]["content"]
+            .as_array()
+            .expect("response_item content should be array");
+        assert!(content_blocks.iter().any(|b| b["type"] == "tool_use"));
+        assert!(content_blocks.iter().any(|b| b["type"] == "tool_result"));
+
+        assert_eq!(events[1]["type"], "event_msg");
+        assert_eq!(events[1]["payload"]["type"], "token_count");
+        assert_eq!(events[1]["payload"]["info"]["input_tokens"], 11);
+        assert_eq!(events[1]["payload"]["info"]["output_tokens"], 22);
+        assert_eq!(events[1]["payload"]["info"]["total_tokens"], 33);
+    }
+
+    #[test]
+    fn response_item_with_only_tool_result_is_not_dropped() {
+        let file_text = serde_json::to_string(&json!({
+            "type": "response_item",
+            "timestamp": 1700000000.0,
+            "payload": {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "call-2",
+                    "content": "lint clean",
+                    "is_error": false
+                }]
+            }
+        }))
+        .expect("serializable test envelope");
+
+        let provider = Codex;
+        let session = provider
+            .read_jsonl(Path::new("/tmp/rollout-test.jsonl"), &file_text)
+            .expect("Codex JSONL reader should parse tool_result-only response_item");
+
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].tool_results.len(), 1);
+        assert_eq!(session.messages[0].tool_results[0].content, "lint clean");
+    }
+
+    #[test]
+    fn resume_command_uses_subcommand_form() {
+        let provider = Codex;
+        assert_eq!(
+            <Codex as Provider>::resume_command(&provider, "abc123"),
+            "codex resume abc123"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Reader unit tests
+    // -----------------------------------------------------------------------
+
+    /// Read Codex JSONL from an inline string.
+    fn read_codex_jsonl(content: &str) -> crate::model::CanonicalSession {
+        let provider = Codex;
+        provider
+            .read_jsonl(Path::new("/tmp/test-rollout.jsonl"), content)
+            .unwrap_or_else(|e| panic!("read_jsonl failed: {e}"))
+    }
+
+    /// Read Codex legacy JSON from an inline string.
+    fn read_codex_legacy(content: &str) -> crate::model::CanonicalSession {
+        let provider = Codex;
+        provider
+            .read_legacy_json(Path::new("/tmp/test-legacy.json"), content)
+            .unwrap_or_else(|e| panic!("read_legacy_json failed: {e}"))
+    }
+
+    #[test]
+    fn reader_jsonl_basic_exchange() {
+        let session = read_codex_jsonl(
+            r#"{"type":"session_meta","timestamp":1700000000.0,"payload":{"id":"test-001","cwd":"/data/proj"}}
+{"type":"event_msg","timestamp":1700000001.0,"payload":{"type":"user_message","message":"Hello"}}
+{"type":"response_item","timestamp":1700000002.0,"payload":{"role":"assistant","content":[{"type":"input_text","text":"Hi back"}]}}"#,
+        );
+        assert_eq!(session.session_id, "test-001");
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].role, MessageRole::User);
+        assert_eq!(session.messages[0].content, "Hello");
+        assert_eq!(session.messages[1].role, MessageRole::Assistant);
+        assert_eq!(session.messages[1].content, "Hi back");
+        assert_eq!(
+            session.workspace,
+            Some(std::path::PathBuf::from("/data/proj"))
+        );
+    }
+
+    #[test]
+    fn reader_jsonl_reasoning_events() {
+        let session = read_codex_jsonl(
+            r#"{"type":"session_meta","timestamp":1700000000.0,"payload":{"id":"r1","cwd":"/tmp"}}
+{"type":"event_msg","timestamp":1700000001.0,"payload":{"type":"user_message","message":"Q"}}
+{"type":"event_msg","timestamp":1700000002.0,"payload":{"type":"agent_reasoning","text":"Thinking about it..."}}
+{"type":"response_item","timestamp":1700000003.0,"payload":{"role":"assistant","content":[{"type":"input_text","text":"Answer"}]}}"#,
+        );
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages[1].role, MessageRole::Assistant);
+        assert_eq!(session.messages[1].author.as_deref(), Some("reasoning"));
+        assert_eq!(session.messages[1].content, "Thinking about it...");
+    }
+
+    #[test]
+    fn reader_jsonl_skips_non_conversational_events() {
+        let session = read_codex_jsonl(
+            r#"{"type":"session_meta","timestamp":1700000000.0,"payload":{"id":"skip1","cwd":"/tmp"}}
+{"type":"event_msg","timestamp":1700000001.0,"payload":{"type":"user_message","message":"Q"}}
+{"type":"event_msg","timestamp":1700000002.0,"payload":{"type":"token_count","info":{"input_tokens":100}}}
+{"type":"event_msg","timestamp":1700000003.0,"payload":{"type":"turn_aborted"}}
+{"type":"response_item","timestamp":1700000004.0,"payload":{"role":"assistant","content":[{"type":"input_text","text":"A"}]}}"#,
+        );
+        assert_eq!(session.messages.len(), 2);
+    }
+
+    #[test]
+    fn reader_jsonl_tool_calls_in_response_item() {
+        let session = read_codex_jsonl(
+            r#"{"type":"session_meta","timestamp":1700000000.0,"payload":{"id":"tc1","cwd":"/tmp"}}
+{"type":"event_msg","timestamp":1700000001.0,"payload":{"type":"user_message","message":"Run it"}}
+{"type":"response_item","timestamp":1700000002.0,"payload":{"role":"assistant","content":[{"type":"input_text","text":"Running"},{"type":"tool_use","id":"call-1","name":"Bash","input":{"command":"ls"}}]}}"#,
+        );
+        assert_eq!(session.messages[1].tool_calls.len(), 1);
+        assert_eq!(session.messages[1].tool_calls[0].name, "Bash");
+    }
+
+    #[test]
+    fn reader_jsonl_tolerates_malformed_lines() {
+        let session = read_codex_jsonl(
+            r#"{"type":"session_meta","timestamp":1700000000.0,"payload":{"id":"mf1","cwd":"/tmp"}}
+not json
+{"broken
+{"type":"event_msg","timestamp":1700000001.0,"payload":{"type":"user_message","message":"Valid"}}
+{"type":"response_item","timestamp":1700000002.0,"payload":{"role":"assistant","content":[{"type":"input_text","text":"Also valid"}]}}"#,
+        );
+        assert_eq!(session.messages.len(), 2);
+    }
+
+    #[test]
+    fn reader_jsonl_empty_content_skipped() {
+        let session = read_codex_jsonl(
+            r#"{"type":"session_meta","timestamp":1700000000.0,"payload":{"id":"ec1","cwd":"/tmp"}}
+{"type":"event_msg","timestamp":1700000001.0,"payload":{"type":"user_message","message":""}}
+{"type":"event_msg","timestamp":1700000002.0,"payload":{"type":"user_message","message":"   "}}
+{"type":"event_msg","timestamp":1700000003.0,"payload":{"type":"user_message","message":"Valid"}}
+{"type":"response_item","timestamp":1700000004.0,"payload":{"role":"assistant","content":[{"type":"input_text","text":"Reply"}]}}"#,
+        );
+        assert_eq!(session.messages.len(), 2);
+    }
+
+    #[test]
+    fn reader_jsonl_session_id_fallback() {
+        let session = read_codex_jsonl(
+            r#"{"type":"event_msg","timestamp":1700000001.0,"payload":{"type":"user_message","message":"No meta"}}
+{"type":"response_item","timestamp":1700000002.0,"payload":{"role":"assistant","content":[{"type":"input_text","text":"Reply"}]}}"#,
+        );
+        // No session_meta → ID falls back to filename stem.
+        assert!(!session.session_id.is_empty());
+    }
+
+    #[test]
+    fn reader_legacy_json_basic() {
+        let session = read_codex_legacy(
+            r#"{"session":{"id":"legacy-1","cwd":"/home/user/proj"},"items":[
+                {"role":"user","content":"Fix the bug","timestamp":1700000000},
+                {"role":"assistant","content":"Fixed it","timestamp":1700000010}
+            ]}"#,
+        );
+        assert_eq!(session.session_id, "legacy-1");
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(
+            session.workspace,
+            Some(std::path::PathBuf::from("/home/user/proj"))
+        );
+        assert!(session.started_at.is_some());
+    }
+
+    #[test]
+    fn reader_legacy_json_empty_items() {
+        let session = read_codex_legacy(r#"{"session":{"id":"empty-1","cwd":"/tmp"},"items":[]}"#);
+        assert_eq!(session.messages.len(), 0);
+    }
+
+    #[test]
+    fn reader_legacy_json_skips_empty_content() {
+        let session = read_codex_legacy(
+            r#"{"session":{"id":"skip-1","cwd":"/tmp"},"items":[
+                {"role":"user","content":"","timestamp":1700000000},
+                {"role":"user","content":"Real","timestamp":1700000001},
+                {"role":"assistant","content":"Reply","timestamp":1700000002}
+            ]}"#,
+        );
+        assert_eq!(session.messages.len(), 2);
+    }
+
+    #[test]
+    fn reader_title_from_first_user_message() {
+        let session = read_codex_jsonl(
+            r#"{"type":"session_meta","timestamp":1700000000.0,"payload":{"id":"t1","cwd":"/tmp"}}
+{"type":"event_msg","timestamp":1700000001.0,"payload":{"type":"user_message","message":"Optimize the database query"}}
+{"type":"response_item","timestamp":1700000002.0,"payload":{"role":"assistant","content":[{"type":"input_text","text":"Done"}]}}"#,
+        );
+        assert_eq!(
+            session.title.as_deref(),
+            Some("Optimize the database query")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Writer helper unit tests
+    // -----------------------------------------------------------------------
+
+    use super::codex_role_string;
+
+    #[test]
+    fn writer_user_event_format() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::User,
+            content: "Hello from user".to_string(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: json!({}),
+        };
+        let events = codex_events_for_message(&msg, 1_700_000_000.0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "event_msg");
+        assert_eq!(events[0]["payload"]["type"], "user_message");
+        assert_eq!(events[0]["payload"]["message"], "Hello from user");
+    }
+
+    #[test]
+    fn writer_reasoning_event_format() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::Assistant,
+            content: "Deep thought".to_string(),
+            timestamp: None,
+            author: Some("reasoning".to_string()),
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: json!({}),
+        };
+        let events = codex_events_for_message(&msg, 1_700_000_000.0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "event_msg");
+        assert_eq!(events[0]["payload"]["type"], "agent_reasoning");
+        assert_eq!(events[0]["payload"]["text"], "Deep thought");
+    }
+
+    #[test]
+    fn writer_codex_role_string_mapping() {
+        assert_eq!(codex_role_string(&MessageRole::User), "user");
+        assert_eq!(codex_role_string(&MessageRole::Assistant), "assistant");
+        assert_eq!(codex_role_string(&MessageRole::Tool), "tool");
+        assert_eq!(codex_role_string(&MessageRole::System), "system");
+        assert_eq!(
+            codex_role_string(&MessageRole::Other("custom".to_string())),
+            "custom"
+        );
+    }
+
+    #[test]
+    fn writer_assistant_without_token_count_produces_one_event() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::Assistant,
+            content: "Simple reply".to_string(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: json!(null),
+        };
+        let events = codex_events_for_message(&msg, 1_700_000_000.0);
+        assert_eq!(
+            events.len(),
+            1,
+            "Assistant without usage should produce one response_item"
+        );
+        assert_eq!(events[0]["type"], "response_item");
     }
 }

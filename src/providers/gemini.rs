@@ -1,7 +1,7 @@
 //! Gemini CLI provider — reads/writes JSON sessions under `~/.gemini/tmp/`.
 //!
 //! Session files: `<hash>/chats/session-<id>.json`
-//! Resume command: `gemini` (in the project directory)
+//! Resume command: `gemini --resume <session-id>`
 //!
 //! ## JSON format
 //!
@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 use walkdir::WalkDir;
 
 use crate::discovery::DetectionResult;
@@ -295,20 +295,176 @@ impl Provider for Gemini {
 
     fn write_session(
         &self,
-        _session: &CanonicalSession,
-        _opts: &WriteOptions,
+        session: &CanonicalSession,
+        opts: &WriteOptions,
     ) -> anyhow::Result<WrittenSession> {
-        todo!("bd-1a2.3: Gemini writer")
+        let target_session_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+
+        // Determine target path.
+        let tmp_dir = Self::tmp_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine Gemini tmp directory"))?;
+
+        // Use workspace hash for project directory, or a fallback hash.
+        let workspace_path = session
+            .workspace
+            .as_deref()
+            .unwrap_or(std::path::Path::new("/tmp"));
+        let hash = session
+            .metadata
+            .get("project_hash")
+            .or_else(|| session.metadata.get("projectHash"))
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string)
+            .unwrap_or_else(|| project_hash(workspace_path));
+        let chats_dir = tmp_dir.join(&hash).join("chats");
+        let filename = session_filename(&target_session_id, &now);
+        let target_path = chats_dir.join(&filename);
+
+        debug!(
+            target_session_id,
+            target_path = %target_path.display(),
+            "writing Gemini session"
+        );
+
+        // Build the Gemini JSON structure.
+        let start_time = session
+            .started_at
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .unwrap_or(now)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+        let last_updated = session
+            .ended_at
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .unwrap_or(now)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+        let mut json_messages: Vec<serde_json::Value> = Vec::with_capacity(session.messages.len());
+
+        for msg in &session.messages {
+            let msg_type = gemini_message_type(msg);
+
+            let ts = msg
+                .timestamp
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+
+            let mut entry = serde_json::json!({
+                "type": msg_type,
+                "content": gemini_message_content(msg),
+            });
+            if let Some(ref t) = ts {
+                entry["timestamp"] = serde_json::Value::String(t.clone());
+            }
+
+            merge_gemini_extra_fields(&mut entry, &msg.extra);
+            json_messages.push(entry);
+        }
+
+        let root = serde_json::json!({
+            "sessionId": target_session_id,
+            "projectHash": hash,
+            "startTime": start_time,
+            "lastUpdated": last_updated,
+            "messages": json_messages,
+        });
+
+        let content_bytes = serde_json::to_string_pretty(&root)?.into_bytes();
+
+        let outcome = crate::pipeline::atomic_write(&target_path, &content_bytes, opts.force)?;
+
+        info!(
+            target_session_id,
+            path = %outcome.target_path.display(),
+            messages = session.messages.len(),
+            "Gemini session written"
+        );
+
+        Ok(WrittenSession {
+            paths: vec![outcome.target_path],
+            session_id: target_session_id.clone(),
+            resume_command: self.resume_command(&target_session_id),
+            backup_path: outcome.backup_path,
+        })
     }
 
-    fn resume_command(&self, _session_id: &str) -> String {
-        "gemini".to_string()
+    fn resume_command(&self, session_id: &str) -> String {
+        format!("gemini --resume {session_id}")
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn gemini_message_type(msg: &CanonicalMessage) -> String {
+    match msg.role {
+        MessageRole::User => "user".to_string(),
+        MessageRole::Assistant => "model".to_string(),
+        MessageRole::Tool => "tool".to_string(),
+        MessageRole::System => "system".to_string(),
+        MessageRole::Other(ref other) => other.clone(),
+    }
+}
+
+fn gemini_message_content(msg: &CanonicalMessage) -> serde_json::Value {
+    if let Some(content) = msg.extra.get("content")
+        && !content.is_null()
+    {
+        return content.clone();
+    }
+
+    if msg.tool_calls.is_empty() && msg.tool_results.is_empty() {
+        return serde_json::Value::String(msg.content.clone());
+    }
+
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
+    if !msg.content.is_empty() {
+        blocks.push(serde_json::json!({
+            "type": "text",
+            "text": msg.content,
+        }));
+    }
+    for tc in &msg.tool_calls {
+        blocks.push(serde_json::json!({
+            "type": "tool_use",
+            "id": tc.id.as_deref().unwrap_or(""),
+            "name": tc.name,
+            "input": tc.arguments,
+        }));
+    }
+    for tr in &msg.tool_results {
+        blocks.push(serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": tr.call_id.as_deref().unwrap_or(""),
+            "content": tr.content,
+            "is_error": tr.is_error,
+        }));
+    }
+
+    if blocks.is_empty() {
+        serde_json::Value::String(msg.content.clone())
+    } else {
+        serde_json::Value::Array(blocks)
+    }
+}
+
+fn merge_gemini_extra_fields(entry: &mut serde_json::Value, extra: &serde_json::Value) {
+    let Some(entry_obj) = entry.as_object_mut() else {
+        return;
+    };
+    let Some(extra_obj) = extra.as_object() else {
+        return;
+    };
+
+    for (k, v) in extra_obj {
+        if k == "type" || k == "content" || k == "timestamp" {
+            continue;
+        }
+        entry_obj.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+}
 
 /// Try to extract a workspace path from message content.
 ///
@@ -361,9 +517,16 @@ fn session_id_from_file(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{project_hash, session_filename};
+    use super::{
+        Gemini, gemini_message_content, gemini_message_type, merge_gemini_extra_fields,
+        project_hash, session_filename,
+    };
     use chrono::{TimeZone, Utc};
+    use serde_json::json;
     use std::path::Path;
+
+    use crate::model::{CanonicalMessage, MessageRole, ToolCall, ToolResult};
+    use crate::providers::Provider;
 
     #[test]
     fn project_hash_matches_observed_sha256_mapping() {
@@ -383,5 +546,353 @@ mod tests {
             .expect("valid timestamp");
         let filename = session_filename("8c1890a5-eb39-4c5c-acff-93790d35dd3f", &now);
         assert_eq!(filename, "session-2026-01-10T02-06-8c1890a5.json");
+    }
+
+    #[test]
+    fn message_content_prefers_extra_content_and_preserves_blocks() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::Assistant,
+            content: "fallback".to_string(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: json!({
+                "content": [
+                    {"type": "text", "text": "primary"},
+                    {"type": "grounding", "source": "doc://1"}
+                ]
+            }),
+        };
+
+        let content = gemini_message_content(&msg);
+        assert_eq!(
+            content,
+            json!([
+                {"type": "text", "text": "primary"},
+                {"type": "grounding", "source": "doc://1"}
+            ])
+        );
+    }
+
+    #[test]
+    fn message_content_falls_back_to_tool_blocks_when_needed() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::Assistant,
+            content: "".to_string(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![ToolCall {
+                id: Some("call-7".to_string()),
+                name: "read_file".to_string(),
+                arguments: json!({"path":"README.md"}),
+            }],
+            tool_results: vec![ToolResult {
+                call_id: Some("call-7".to_string()),
+                content: "ok".to_string(),
+                is_error: false,
+            }],
+            extra: serde_json::Value::Null,
+        };
+
+        let content = gemini_message_content(&msg);
+        let blocks = content
+            .as_array()
+            .expect("tool-rich Gemini content should serialize as array");
+        assert!(blocks.iter().any(|b| b["type"] == "tool_use"));
+        assert!(blocks.iter().any(|b| b["type"] == "tool_result"));
+    }
+
+    #[test]
+    fn merge_gemini_extra_fields_keeps_annotations() {
+        let mut entry = json!({
+            "type": "model",
+            "content": "hello"
+        });
+        let extra = json!({
+            "groundingMetadata": {"sourceCount": 2},
+            "citations": [{"uri":"doc://x"}],
+            "timestamp": "should-not-overwrite",
+            "content": "should-not-overwrite",
+            "type": "should-not-overwrite"
+        });
+
+        merge_gemini_extra_fields(&mut entry, &extra);
+        assert_eq!(entry["groundingMetadata"]["sourceCount"], 2);
+        assert_eq!(entry["citations"][0]["uri"], "doc://x");
+        assert_eq!(entry["type"], "model");
+        assert_eq!(entry["content"], "hello");
+    }
+
+    #[test]
+    fn message_type_preserves_non_user_roles() {
+        let assistant = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::Assistant,
+            content: String::new(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: serde_json::Value::Null,
+        };
+        let tool = CanonicalMessage {
+            role: MessageRole::Tool,
+            ..assistant.clone()
+        };
+        let system = CanonicalMessage {
+            role: MessageRole::System,
+            ..assistant.clone()
+        };
+        let other = CanonicalMessage {
+            role: MessageRole::Other("reviewer".to_string()),
+            ..assistant
+        };
+
+        assert_eq!(gemini_message_type(&tool), "tool");
+        assert_eq!(gemini_message_type(&system), "system");
+        assert_eq!(gemini_message_type(&other), "reviewer");
+    }
+
+    #[test]
+    fn resume_command_uses_resume_flag() {
+        let provider = Gemini;
+        assert_eq!(
+            <Gemini as Provider>::resume_command(&provider, "abc123"),
+            "gemini --resume abc123"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Reader unit tests
+    // -----------------------------------------------------------------------
+
+    use std::io::Write as _;
+
+    /// Write JSON content to a temp file and read it back.
+    fn read_gemini_json(content: &str) -> crate::model::CanonicalSession {
+        let mut tmp = tempfile::NamedTempFile::with_suffix(".json").unwrap();
+        tmp.write_all(content.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+        Gemini
+            .read_session(tmp.path())
+            .unwrap_or_else(|e| panic!("read_session failed: {e}"))
+    }
+
+    #[test]
+    fn reader_basic_user_model_exchange() {
+        let session = read_gemini_json(
+            r#"{
+                "sessionId": "gmi-test-1",
+                "startTime": "2026-01-01T00:00:00Z",
+                "lastUpdated": "2026-01-01T00:05:00Z",
+                "messages": [
+                    {"type": "user", "content": "Hello", "timestamp": "2026-01-01T00:00:00Z"},
+                    {"type": "model", "content": "Hi there", "timestamp": "2026-01-01T00:01:00Z"}
+                ]
+            }"#,
+        );
+        assert_eq!(session.session_id, "gmi-test-1");
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].role, MessageRole::User);
+        assert_eq!(session.messages[1].role, MessageRole::Assistant);
+        assert_eq!(session.messages[1].content, "Hi there");
+        assert!(session.started_at.is_some());
+    }
+
+    #[test]
+    fn reader_gemini_role_maps_to_assistant() {
+        let session = read_gemini_json(
+            r#"{
+                "sessionId": "gmi-role-test",
+                "messages": [
+                    {"type": "user", "content": "Q"},
+                    {"type": "gemini", "content": "A"}
+                ]
+            }"#,
+        );
+        assert_eq!(session.messages[1].role, MessageRole::Assistant);
+    }
+
+    #[test]
+    fn reader_array_content_blocks() {
+        let session = read_gemini_json(
+            r#"{
+                "sessionId": "gmi-blocks",
+                "messages": [
+                    {"type": "user", "content": "Q"},
+                    {"type": "model", "content": [
+                        {"type": "text", "text": "Main answer."},
+                        {"type": "grounding", "source": "doc://ref"}
+                    ]}
+                ]
+            }"#,
+        );
+        assert_eq!(session.messages[1].content, "Main answer.");
+    }
+
+    #[test]
+    fn reader_preserves_extra_fields() {
+        let session = read_gemini_json(
+            r#"{
+                "sessionId": "gmi-extra",
+                "messages": [
+                    {"type": "user", "content": "Q"},
+                    {"type": "model", "content": "A", "groundingMetadata": {"count": 3}, "citations": []}
+                ]
+            }"#,
+        );
+        assert!(session.messages[1].extra.get("groundingMetadata").is_some());
+        assert!(session.messages[1].extra.get("citations").is_some());
+    }
+
+    #[test]
+    fn reader_skips_empty_messages() {
+        let session = read_gemini_json(
+            r#"{
+                "sessionId": "gmi-empty",
+                "messages": [
+                    {"type": "user", "content": "Q"},
+                    {"type": "model", "content": ""},
+                    {"type": "model", "content": "   "},
+                    {"type": "model", "content": "Valid"}
+                ]
+            }"#,
+        );
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[1].content, "Valid");
+    }
+
+    #[test]
+    fn reader_session_id_fallback_to_filename() {
+        let session = read_gemini_json(
+            r#"{
+                "messages": [
+                    {"type": "user", "content": "Q"},
+                    {"type": "model", "content": "A"}
+                ]
+            }"#,
+        );
+        // No sessionId in JSON → falls back to filename stem minus "session-" prefix.
+        assert!(!session.session_id.is_empty());
+    }
+
+    #[test]
+    fn reader_empty_messages_array() {
+        let session = read_gemini_json(r#"{"sessionId": "gmi-empty-arr", "messages": []}"#);
+        assert_eq!(session.messages.len(), 0);
+    }
+
+    #[test]
+    fn reader_missing_messages_key() {
+        let session = read_gemini_json(r#"{"sessionId": "gmi-no-msgs"}"#);
+        assert_eq!(session.messages.len(), 0);
+    }
+
+    #[test]
+    fn reader_project_hash_preserved_in_metadata() {
+        let session = read_gemini_json(
+            r#"{
+                "sessionId": "gmi-hash",
+                "projectHash": "abc123def",
+                "messages": [
+                    {"type": "user", "content": "Q"},
+                    {"type": "model", "content": "A"}
+                ]
+            }"#,
+        );
+        assert_eq!(session.metadata["project_hash"].as_str(), Some("abc123def"));
+    }
+
+    #[test]
+    fn reader_title_from_first_user_message() {
+        let session = read_gemini_json(
+            r#"{
+                "sessionId": "gmi-title",
+                "messages": [
+                    {"type": "user", "content": "Explain the architecture of this system"},
+                    {"type": "model", "content": "The system uses..."}
+                ]
+            }"#,
+        );
+        assert_eq!(
+            session.title.as_deref(),
+            Some("Explain the architecture of this system")
+        );
+    }
+
+    #[test]
+    fn reader_timestamp_tracking() {
+        let session = read_gemini_json(
+            r#"{
+                "sessionId": "gmi-ts",
+                "startTime": "2026-01-01T00:00:00Z",
+                "lastUpdated": "2026-01-01T01:00:00Z",
+                "messages": [
+                    {"type": "user", "content": "Q", "timestamp": "2026-01-01T00:30:00Z"},
+                    {"type": "model", "content": "A", "timestamp": "2026-01-01T00:45:00Z"}
+                ]
+            }"#,
+        );
+        assert!(session.started_at.is_some());
+        assert!(session.ended_at.is_some());
+        // ended_at should be max of lastUpdated and message timestamps.
+        assert!(session.ended_at.unwrap() >= session.started_at.unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // Writer helper unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn writer_content_plain_string_without_extra() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::User,
+            content: "Simple text".to_string(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: serde_json::Value::Null,
+        };
+        let content = gemini_message_content(&msg);
+        assert!(
+            content.is_string(),
+            "Gemini content without extra should be plain string"
+        );
+        assert_eq!(content.as_str().unwrap(), "Simple text");
+    }
+
+    #[test]
+    fn writer_user_type_is_user() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::User,
+            content: String::new(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: serde_json::Value::Null,
+        };
+        assert_eq!(gemini_message_type(&msg), "user");
+    }
+
+    #[test]
+    fn writer_assistant_type_is_model() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::Assistant,
+            content: String::new(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: serde_json::Value::Null,
+        };
+        assert_eq!(gemini_message_type(&msg), "model");
     }
 }

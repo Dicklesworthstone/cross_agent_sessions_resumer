@@ -272,3 +272,339 @@ pub fn normalize_role(role_str: &str) -> MessageRole {
         other => MessageRole::Other(other.to_string()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -----------------------------------------------------------------------
+    // flatten_content
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn flatten_content_plain_string() {
+        assert_eq!(flatten_content(&json!("hello world")), "hello world");
+    }
+
+    #[test]
+    fn flatten_content_text_blocks() {
+        let val = json!([
+            {"type": "text", "text": "line one"},
+            {"type": "text", "text": "line two"},
+        ]);
+        assert_eq!(flatten_content(&val), "line one\nline two");
+    }
+
+    #[test]
+    fn flatten_content_input_text_blocks() {
+        let val = json!([{"type": "input_text", "text": "codex style"}]);
+        assert_eq!(flatten_content(&val), "codex style");
+    }
+
+    #[test]
+    fn flatten_content_tool_use_block() {
+        let val = json!([
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "/foo/bar.rs"}},
+        ]);
+        assert_eq!(flatten_content(&val), "[Tool: Read - /foo/bar.rs]");
+    }
+
+    #[test]
+    fn flatten_content_tool_use_without_description() {
+        let val = json!([
+            {"type": "tool_use", "name": "Bash", "input": {}},
+        ]);
+        assert_eq!(flatten_content(&val), "[Tool: Bash]");
+    }
+
+    #[test]
+    fn flatten_content_array_of_strings() {
+        let val = json!(["a", "b", "c"]);
+        assert_eq!(flatten_content(&val), "a\nb\nc");
+    }
+
+    #[test]
+    fn flatten_content_object_with_text() {
+        let val = json!({"text": "object text"});
+        assert_eq!(flatten_content(&val), "object text");
+    }
+
+    #[test]
+    fn flatten_content_null_returns_empty() {
+        assert_eq!(flatten_content(&json!(null)), "");
+    }
+
+    #[test]
+    fn flatten_content_number_returns_empty() {
+        assert_eq!(flatten_content(&json!(42)), "");
+    }
+
+    #[test]
+    fn flatten_content_bool_returns_empty() {
+        assert_eq!(flatten_content(&json!(true)), "");
+    }
+
+    #[test]
+    fn flatten_content_mixed_array() {
+        let val = json!([
+            {"type": "text", "text": "first"},
+            "second",
+            {"type": "tool_use", "name": "Edit", "input": {"description": "fix bug"}},
+        ]);
+        assert_eq!(
+            flatten_content(&val),
+            "first\nsecond\n[Tool: Edit - fix bug]"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_timestamp
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_timestamp_epoch_seconds() {
+        // 1_700_000_000 seconds → millis
+        let val = json!(1_700_000_000);
+        assert_eq!(parse_timestamp(&val), Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn parse_timestamp_epoch_millis() {
+        let val = json!(1_700_000_000_000_i64);
+        assert_eq!(parse_timestamp(&val), Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn parse_timestamp_float_seconds() {
+        let val = json!(1_700_000_000.123);
+        assert_eq!(parse_timestamp(&val), Some(1_700_000_000_123));
+    }
+
+    #[test]
+    fn parse_timestamp_string_seconds() {
+        let val = json!("1700000000");
+        assert_eq!(parse_timestamp(&val), Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn parse_timestamp_string_millis() {
+        let val = json!("1700000000000");
+        assert_eq!(parse_timestamp(&val), Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn parse_timestamp_float_string() {
+        let val = json!("1700000000.5");
+        assert_eq!(parse_timestamp(&val), Some(1_700_000_000_500));
+    }
+
+    #[test]
+    fn parse_timestamp_rfc3339() {
+        let val = json!("2026-02-09T12:00:00Z");
+        let result = parse_timestamp(&val);
+        assert!(result.is_some());
+        // Should be around 2026-02-09T12:00:00Z
+        assert!(result.unwrap() > 1_700_000_000_000);
+    }
+
+    #[test]
+    fn parse_timestamp_rfc3339_with_offset() {
+        let val = json!("2026-02-09T12:00:00+05:00");
+        let result = parse_timestamp(&val);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn parse_timestamp_iso8601_with_millis() {
+        let val = json!("2026-02-09T12:00:00.123Z");
+        let result = parse_timestamp(&val);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn parse_timestamp_null_returns_none() {
+        assert_eq!(parse_timestamp(&json!(null)), None);
+    }
+
+    #[test]
+    fn parse_timestamp_empty_string_returns_none() {
+        assert_eq!(parse_timestamp(&json!("")), None);
+    }
+
+    #[test]
+    fn parse_timestamp_garbage_returns_none() {
+        assert_eq!(parse_timestamp(&json!("not a date")), None);
+    }
+
+    #[test]
+    fn parse_timestamp_object_returns_none() {
+        assert_eq!(parse_timestamp(&json!({})), None);
+    }
+
+    #[test]
+    fn parse_timestamp_array_returns_none() {
+        assert_eq!(parse_timestamp(&json!([])), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // normalize_role
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn normalize_role_standard_roles() {
+        assert_eq!(normalize_role("user"), MessageRole::User);
+        assert_eq!(normalize_role("assistant"), MessageRole::Assistant);
+        assert_eq!(normalize_role("tool"), MessageRole::Tool);
+        assert_eq!(normalize_role("system"), MessageRole::System);
+    }
+
+    #[test]
+    fn normalize_role_case_insensitive() {
+        assert_eq!(normalize_role("USER"), MessageRole::User);
+        assert_eq!(normalize_role("Assistant"), MessageRole::Assistant);
+        assert_eq!(normalize_role("TOOL"), MessageRole::Tool);
+    }
+
+    #[test]
+    fn normalize_role_provider_aliases() {
+        assert_eq!(normalize_role("model"), MessageRole::Assistant);
+        assert_eq!(normalize_role("agent"), MessageRole::Assistant);
+        assert_eq!(normalize_role("gemini"), MessageRole::Assistant);
+    }
+
+    #[test]
+    fn normalize_role_unknown_becomes_other() {
+        assert_eq!(
+            normalize_role("reasoning"),
+            MessageRole::Other("reasoning".to_string())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // truncate_title
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn truncate_title_short_text() {
+        assert_eq!(truncate_title("Hello", 100), "Hello");
+    }
+
+    #[test]
+    fn truncate_title_long_text() {
+        let long = "a".repeat(200);
+        let result = truncate_title(&long, 50);
+        assert!(result.ends_with("..."));
+        assert!(result.len() <= 53); // 50 + "..."
+    }
+
+    #[test]
+    fn truncate_title_multiline_uses_first() {
+        assert_eq!(
+            truncate_title("first line\nsecond line\nthird", 100),
+            "first line"
+        );
+    }
+
+    #[test]
+    fn truncate_title_empty_returns_empty() {
+        assert_eq!(truncate_title("", 100), "");
+    }
+
+    #[test]
+    fn truncate_title_whitespace_only_returns_empty() {
+        assert_eq!(truncate_title("   \n   ", 100), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // reindex_messages
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reindex_messages_assigns_sequential_indices() {
+        let mut msgs = vec![
+            CanonicalMessage {
+                idx: 99,
+                role: MessageRole::User,
+                content: "a".to_string(),
+                timestamp: None,
+                author: None,
+                tool_calls: vec![],
+                tool_results: vec![],
+                extra: json!({}),
+            },
+            CanonicalMessage {
+                idx: 42,
+                role: MessageRole::Assistant,
+                content: "b".to_string(),
+                timestamp: None,
+                author: None,
+                tool_calls: vec![],
+                tool_results: vec![],
+                extra: json!({}),
+            },
+        ];
+
+        reindex_messages(&mut msgs);
+        assert_eq!(msgs[0].idx, 0);
+        assert_eq!(msgs[1].idx, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Serde round-trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn canonical_message_serde_roundtrip() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::Assistant,
+            content: "Hello".to_string(),
+            timestamp: Some(1_700_000_000_000),
+            author: Some("claude-3".to_string()),
+            tool_calls: vec![ToolCall {
+                id: Some("tc1".to_string()),
+                name: "Read".to_string(),
+                arguments: json!({"file_path": "/foo.rs"}),
+            }],
+            tool_results: vec![ToolResult {
+                call_id: Some("tc1".to_string()),
+                content: "file contents".to_string(),
+                is_error: false,
+            }],
+            extra: json!({"custom": "field"}),
+        };
+
+        let serialized = serde_json::to_string(&msg).unwrap();
+        let deserialized: CanonicalMessage = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(msg, deserialized);
+    }
+
+    #[test]
+    fn canonical_session_serde_roundtrip() {
+        let session = CanonicalSession {
+            session_id: "test-123".to_string(),
+            provider_slug: "claude-code".to_string(),
+            workspace: Some(std::path::PathBuf::from("/data/projects/test")),
+            title: Some("Test session".to_string()),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_001_000_000),
+            messages: vec![],
+            metadata: json!({"source": "claude_code"}),
+            source_path: std::path::PathBuf::from("/tmp/test.jsonl"),
+            model_name: Some("claude-3".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&session).unwrap();
+        let deserialized: CanonicalSession = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(session, deserialized);
+    }
+
+    #[test]
+    fn message_role_other_preserves_value() {
+        let role = MessageRole::Other("custom".to_string());
+        let serialized = serde_json::to_string(&role).unwrap();
+        let deserialized: MessageRole = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(role, deserialized);
+    }
+}

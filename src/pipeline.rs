@@ -4,14 +4,17 @@
 //! single `convert()` call. Generic over the [`Provider`](crate::providers::Provider)
 //! trait — concrete providers are wired in via the registry.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use tracing::{debug, info, warn};
 
-use crate::discovery::ProviderRegistry;
+use crate::discovery::{ProviderRegistry, SourceHint};
 use crate::error::CasrError;
-use crate::model::CanonicalSession;
-use crate::providers::WrittenSession;
+use crate::model::{CanonicalMessage, CanonicalSession, MessageRole, reindex_messages};
+use crate::providers::{WriteOptions, WrittenSession};
 
 /// Top-level orchestrator for session conversion.
 pub struct ConversionPipeline {
@@ -24,6 +27,7 @@ pub struct ConvertOptions {
     pub dry_run: bool,
     pub force: bool,
     pub verbose: bool,
+    pub enrich: bool,
     pub source_hint: Option<String>,
 }
 
@@ -37,15 +41,378 @@ pub struct ConversionResult {
     pub warnings: Vec<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Session validation
+// ---------------------------------------------------------------------------
+
+/// Result of validating a canonical session.
+#[derive(Debug, Clone, Default)]
+pub struct ValidationResult {
+    /// Fatal issues — pipeline must stop.
+    pub errors: Vec<String>,
+    /// Non-fatal issues — surfaced in UX/JSON but conversion continues.
+    pub warnings: Vec<String>,
+    /// Informational notes — shown in verbose/trace mode.
+    pub info: Vec<String>,
+}
+
+impl ValidationResult {
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+}
+
+/// Validate a canonical session for completeness and quality.
+///
+/// Returns errors (fatal), warnings (non-fatal), and info notes.
+pub fn validate_session(session: &CanonicalSession) -> ValidationResult {
+    let mut result = ValidationResult::default();
+
+    // ERRORS — pipeline stops.
+    if session.messages.is_empty() {
+        result.errors.push("Session has no messages.".to_string());
+        return result; // No point checking further.
+    }
+
+    let has_user = session.messages.iter().any(|m| m.role == MessageRole::User);
+    let has_assistant = session
+        .messages
+        .iter()
+        .any(|m| m.role == MessageRole::Assistant);
+
+    if !has_user || !has_assistant {
+        result.errors.push(
+            "Session must have at least one user message and one assistant message.".to_string(),
+        );
+    }
+
+    // WARNINGS — conversion continues.
+    if session.workspace.is_none() {
+        result.warnings.push(
+            "Session has no workspace. Target agent may not know which project to work in."
+                .to_string(),
+        );
+    }
+
+    let has_timestamps = session.messages.iter().any(|m| m.timestamp.is_some());
+    if !has_timestamps {
+        result
+            .warnings
+            .push("Session has no timestamps. Message ordering may be unreliable.".to_string());
+    }
+
+    // Unusual role ordering: two user or two assistant messages in a row.
+    for window in session.messages.windows(2) {
+        if window[0].role == window[1].role
+            && matches!(window[0].role, MessageRole::User | MessageRole::Assistant)
+        {
+            result.warnings.push(format!(
+                "Consecutive {:?} messages at indices {} and {} — may confuse target agent.",
+                window[0].role, window[0].idx, window[1].idx
+            ));
+            break; // One warning is enough.
+        }
+    }
+
+    if session.messages.len() < 3 {
+        result.warnings.push(
+            "Very short session (<3 messages). May not provide enough context for resumption."
+                .to_string(),
+        );
+    }
+
+    // INFO — verbose/trace only.
+    let has_tool_calls = session.messages.iter().any(|m| !m.tool_calls.is_empty());
+    if has_tool_calls {
+        result.info.push(
+            "Session contains tool calls. Tool semantics may not translate perfectly between providers."
+                .to_string(),
+        );
+    }
+
+    let mut known_tool_call_ids: HashSet<&str> = HashSet::new();
+    for msg in &session.messages {
+        for call in &msg.tool_calls {
+            if let Some(call_id) = call.id.as_deref() {
+                known_tool_call_ids.insert(call_id);
+            }
+        }
+    }
+
+    for msg in &session.messages {
+        for tool_result in &msg.tool_results {
+            if let Some(call_id) = tool_result.call_id.as_deref()
+                && !known_tool_call_ids.contains(call_id)
+            {
+                result.info.push(format!(
+                    "Tool result at message index {} references unknown tool call id '{call_id}'.",
+                    msg.idx
+                ));
+                break;
+            }
+        }
+    }
+
+    result
+}
+
+fn prepend_enrichment_messages(
+    session: &mut CanonicalSession,
+    source_provider: &str,
+    target_provider: &str,
+    source_session_id: &str,
+) -> usize {
+    let first_timestamp = session.messages.iter().filter_map(|m| m.timestamp).min();
+    let notice_timestamp = first_timestamp.map(|ts| ts.saturating_sub(2));
+    let summary_timestamp = notice_timestamp.map(|ts| ts.saturating_add(1));
+
+    let mut notice_lines = vec![
+        "[casr synthetic context]".to_string(),
+        format!(
+            "This session was originally created in {source_provider} and converted to {target_provider} format by casr."
+        ),
+        format!("Original session ID: {source_session_id}."),
+        "Some provider-specific context may have been lost in conversion.".to_string(),
+        format!("Original message count: {}.", session.messages.len()),
+    ];
+    if let Some(workspace) = &session.workspace {
+        notice_lines.push(format!("Workspace: {}", workspace.display()));
+    }
+
+    let (summary_count, summary_lines) = build_recent_summary(session, 4, 180);
+    let summary_body = format!(
+        "[casr synthetic context]\nRecent conversation snapshot (last {summary_count} message(s)):\n{summary_lines}"
+    );
+
+    let notice = CanonicalMessage {
+        idx: 0,
+        role: MessageRole::System,
+        content: notice_lines.join("\n"),
+        timestamp: notice_timestamp,
+        author: Some("casr-enrichment".to_string()),
+        tool_calls: Vec::new(),
+        tool_results: Vec::new(),
+        extra: serde_json::json!({
+            "casr_enrichment": true,
+            "synthetic": true,
+            "enrichment_type": "conversion_notice",
+            "source_provider": source_provider,
+            "target_provider": target_provider,
+            "source_session_id": source_session_id,
+        }),
+    };
+
+    let summary = CanonicalMessage {
+        idx: 1,
+        role: MessageRole::System,
+        content: summary_body,
+        timestamp: summary_timestamp,
+        author: Some("casr-enrichment".to_string()),
+        tool_calls: Vec::new(),
+        tool_results: Vec::new(),
+        extra: serde_json::json!({
+            "casr_enrichment": true,
+            "synthetic": true,
+            "enrichment_type": "recent_summary",
+            "source_provider": source_provider,
+            "target_provider": target_provider,
+            "source_session_id": source_session_id,
+            "summary_message_count": summary_count,
+        }),
+    };
+
+    let inserted = 2;
+    session.messages.insert(0, summary);
+    session.messages.insert(0, notice);
+    reindex_messages(&mut session.messages);
+    inserted
+}
+
+fn build_recent_summary(
+    session: &CanonicalSession,
+    max_messages: usize,
+    max_chars_per_message: usize,
+) -> (usize, String) {
+    let start = session.messages.len().saturating_sub(max_messages);
+    let mut lines: Vec<String> = Vec::new();
+
+    for msg in &session.messages[start..] {
+        let role = message_role_label(&msg.role);
+        let compact_content = compact_summary_text(&msg.content, max_chars_per_message);
+        lines.push(format!("- {role}: {compact_content}"));
+    }
+
+    if lines.is_empty() {
+        lines.push("- (no messages)".to_string());
+    }
+
+    (lines.len(), lines.join("\n"))
+}
+
+fn compact_summary_text(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return "[empty]".to_string();
+    }
+
+    let compact_len = compact.chars().count();
+    if compact_len <= max_chars {
+        return compact;
+    }
+
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+
+    let mut truncated = String::new();
+    for ch in compact.chars().take(max_chars - 3) {
+        truncated.push(ch);
+    }
+    truncated.push_str("...");
+    truncated
+}
+
+fn message_role_label(role: &MessageRole) -> String {
+    match role {
+        MessageRole::User => "user".to_string(),
+        MessageRole::Assistant => "assistant".to_string(),
+        MessageRole::Tool => "tool".to_string(),
+        MessageRole::System => "system".to_string(),
+        MessageRole::Other(other) => other.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline orchestrator
+// ---------------------------------------------------------------------------
+
 impl ConversionPipeline {
     /// Run the full detect → read → validate → write → verify pipeline.
     pub fn convert(
         &self,
-        _target_alias: &str,
-        _session_id: &str,
-        _opts: ConvertOptions,
+        target_alias: &str,
+        session_id: &str,
+        opts: ConvertOptions,
     ) -> anyhow::Result<ConversionResult> {
-        todo!("bd-ikb.1: conversion pipeline")
+        // 1. Resolve target provider.
+        let target_provider = self.registry.find_by_alias(target_alias).ok_or_else(|| {
+            CasrError::UnknownProviderAlias {
+                alias: target_alias.to_string(),
+                known_aliases: self.registry.known_aliases(),
+            }
+        })?;
+
+        info!(
+            target = target_provider.name(),
+            session_id, "starting conversion"
+        );
+
+        // 2. Resolve source session.
+        let source_hint = opts.source_hint.as_deref().map(SourceHint::parse);
+        let resolved = self
+            .registry
+            .resolve_session(session_id, source_hint.as_ref())?;
+
+        debug!(
+            source = resolved.provider.name(),
+            path = %resolved.path.display(),
+            "source session resolved"
+        );
+
+        // 3. Read source session into canonical IR.
+        let mut canonical = resolved.provider.read_session(&resolved.path)?;
+        debug!(
+            messages = canonical.messages.len(),
+            session_id = canonical.session_id,
+            "source session read"
+        );
+
+        // 4. Validate.
+        let validation = validate_session(&canonical);
+        let mut all_warnings: Vec<String> = validation.warnings.clone();
+
+        if validation.has_errors() {
+            return Err(CasrError::ValidationError {
+                errors: validation.errors,
+                warnings: validation.warnings,
+                info: validation.info,
+            }
+            .into());
+        }
+
+        for note in &validation.info {
+            debug!(note, "validation info");
+        }
+
+        // 5. Optional synthetic context enrichment.
+        if opts.enrich {
+            let source_session_id = canonical.session_id.clone();
+            let inserted = prepend_enrichment_messages(
+                &mut canonical,
+                resolved.provider.slug(),
+                target_provider.slug(),
+                &source_session_id,
+            );
+            info!(inserted, "applied casr enrichment");
+            all_warnings.push(format!(
+                "Added {inserted} synthetic context message(s) via --enrich."
+            ));
+        }
+
+        // 5. Dry-run short-circuit.
+        if opts.dry_run {
+            info!("dry run — skipping write and verify");
+            return Ok(ConversionResult {
+                source_provider: resolved.provider.slug().to_string(),
+                target_provider: target_provider.slug().to_string(),
+                canonical_session: canonical,
+                written: None,
+                warnings: all_warnings,
+            });
+        }
+
+        // 6. Write to target provider.
+        let write_opts = WriteOptions { force: opts.force };
+        let written = target_provider.write_session(&canonical, &write_opts)?;
+        info!(
+            target_session_id = written.session_id,
+            resume_command = written.resume_command,
+            "session written"
+        );
+
+        // 7. Read-back verification.
+        if let Some(first_path) = written.paths.first() {
+            match target_provider.read_session(first_path) {
+                Ok(readback) => {
+                    debug!(
+                        readback_messages = readback.messages.len(),
+                        original_messages = canonical.messages.len(),
+                        "read-back verification"
+                    );
+                    if readback.messages.len() != canonical.messages.len() {
+                        all_warnings.push(format!(
+                            "Read-back message count mismatch: wrote {} messages, read back {}.",
+                            canonical.messages.len(),
+                            readback.messages.len()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "read-back verification failed");
+                    // Restore backup if possible.
+                    // For now, add a warning rather than failing hard.
+                    all_warnings.push(format!("Read-back verification failed: {e}"));
+                }
+            }
+        }
+
+        Ok(ConversionResult {
+            source_provider: resolved.provider.slug().to_string(),
+            target_provider: target_provider.slug().to_string(),
+            canonical_session: canonical,
+            written: Some(written),
+            warnings: all_warnings,
+        })
     }
 }
 
@@ -114,10 +481,7 @@ pub fn atomic_write(
     };
 
     // 3. Write to temp file in the same directory.
-    let temp_name = format!(
-        ".casr-tmp-{}",
-        uuid::Uuid::new_v4().as_hyphenated()
-    );
+    let temp_name = format!(".casr-tmp-{}", uuid::Uuid::new_v4().as_hyphenated());
     let temp_path = target_path
         .parent()
         .unwrap_or(Path::new("."))
@@ -218,4 +582,111 @@ fn find_backup_path(target: &Path) -> PathBuf {
         "{base}.bak.{}",
         uuid::Uuid::new_v4().as_hyphenated()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn sample_message(idx: usize, role: MessageRole, content: &str) -> CanonicalMessage {
+        CanonicalMessage {
+            idx,
+            role,
+            content: content.to_string(),
+            timestamp: Some(1_700_000_000_000 + idx as i64),
+            author: None,
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+            extra: serde_json::Value::Null,
+        }
+    }
+
+    fn sample_session() -> CanonicalSession {
+        CanonicalSession {
+            session_id: "src-123".to_string(),
+            provider_slug: "codex".to_string(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            title: Some("Example".to_string()),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_010_000),
+            messages: vec![
+                sample_message(
+                    0,
+                    MessageRole::User,
+                    "Investigate parser behavior in providers/codex.rs",
+                ),
+                sample_message(
+                    1,
+                    MessageRole::Assistant,
+                    "I found a mismatch in response_item handling; I will patch it.",
+                ),
+                sample_message(
+                    2,
+                    MessageRole::User,
+                    "Please also verify resume command compatibility.",
+                ),
+            ],
+            metadata: serde_json::Value::Null,
+            source_path: PathBuf::from("/tmp/source.jsonl"),
+            model_name: Some("gpt-5-codex".to_string()),
+        }
+    }
+
+    #[test]
+    fn enrich_prepends_marked_synthetic_messages() {
+        let mut session = sample_session();
+        let original_len = session.messages.len();
+
+        let inserted = prepend_enrichment_messages(&mut session, "codex", "claude-code", "src-123");
+
+        assert_eq!(inserted, 2);
+        assert_eq!(session.messages.len(), original_len + 2);
+        assert_eq!(session.messages[0].role, MessageRole::System);
+        assert_eq!(session.messages[1].role, MessageRole::System);
+        assert!(
+            session.messages[0]
+                .content
+                .contains("[casr synthetic context]")
+        );
+        assert!(
+            session.messages[1]
+                .content
+                .contains("Recent conversation snapshot")
+        );
+        assert_eq!(
+            session.messages[0]
+                .extra
+                .get("casr_enrichment")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            session.messages[1]
+                .extra
+                .get("enrichment_type")
+                .and_then(|v| v.as_str()),
+            Some("recent_summary")
+        );
+
+        for (idx, msg) in session.messages.iter().enumerate() {
+            assert_eq!(msg.idx, idx);
+        }
+    }
+
+    #[test]
+    fn recent_summary_is_deterministic_and_compact() {
+        let mut session = sample_session();
+        session.messages.push(sample_message(
+            3,
+            MessageRole::Assistant,
+            "   This    has  extra   spacing\nand line breaks that should compact cleanly.   ",
+        ));
+
+        let (count, summary) = build_recent_summary(&session, 2, 40);
+        assert_eq!(count, 2);
+        assert!(summary.contains("- user: Please also verify resume command"));
+        assert!(summary.contains("- assistant: This has extra spacing"));
+        assert!(summary.contains("..."));
+    }
 }
