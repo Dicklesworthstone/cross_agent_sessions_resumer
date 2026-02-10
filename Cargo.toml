@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Cross Agent Session Resumer — resume AI coding sessions across providers"
 license = "MIT"
-repository = "https://github.com/Dicklesworthstone/cross_agent_sessions_resumer"
+repository = "https://github.com/Dicklesworthstone/cross_agent_session_resumer"
 
 [dependencies]
 anyhow = "1"

@@ -91,8 +91,8 @@ Notes:
 ### From Source (Recommended)
 
 ```bash
-git clone https://github.com/Dicklesworthstone/cross_agent_sessions_resumer
-cd cross_agent_sessions_resumer
+git clone https://github.com/Dicklesworthstone/cross_agent_session_resumer
+cd cross_agent_session_resumer
 cargo build --release
 ./target/release/casr --help
 ```

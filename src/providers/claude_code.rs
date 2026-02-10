@@ -37,7 +37,7 @@ pub struct ClaudeCode;
 /// are preserved.
 ///
 /// Examples:
-/// - `/data/projects/cross_agent_sessions_resumer` -> `-data-projects-cross-agent-sessions-resumer`
+/// - `/data/projects/cross_agent_session_resumer` -> `-data-projects-cross-agent-session-resumer`
 /// - `/data/projects/jeffreys-skills.md` -> `-data-projects-jeffreys-skills-md`
 pub fn project_dir_key(workspace: &Path) -> String {
     workspace
@@ -553,8 +553,8 @@ mod tests {
 
     #[test]
     fn project_dir_key_matches_observed_workspace_mapping() {
-        let got = project_dir_key(Path::new("/data/projects/cross_agent_sessions_resumer"));
-        assert_eq!(got, "-data-projects-cross-agent-sessions-resumer");
+        let got = project_dir_key(Path::new("/data/projects/cross_agent_session_resumer"));
+        assert_eq!(got, "-data-projects-cross-agent-session-resumer");
     }
 
     #[test]

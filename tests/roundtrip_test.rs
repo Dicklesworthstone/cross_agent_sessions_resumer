@@ -227,7 +227,7 @@ fn roundtrip_cc_to_gemini() {
     assert_new_session_id(&readback, "CC→Gmi");
 
     // Workspace: BEST-EFFORT for Gemini (derived from message content heuristics).
-    // CC fixture workspace is /data/projects/cross_agent_sessions_resumer — if the
+    // CC fixture workspace is /data/projects/cross_agent_session_resumer — if the
     // messages don't mention this path, Gemini reader won't recover it.
     // We just verify the assertion framework doesn't crash.
 }

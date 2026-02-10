@@ -57,8 +57,8 @@ These findings were validated against real local provider state in `~/.claude`, 
 - Project directory key is a sanitized workspace path:
   - non-alphanumeric characters -> `-`
   - case preserved
-  - example: `/data/projects/cross_agent_sessions_resumer` ->
-    `-data-projects-cross-agent-sessions-resumer`.
+  - example: `/data/projects/cross_agent_session_resumer` ->
+    `-data-projects-cross-agent-session-resumer`.
 - Session file: `<project-key>/<session-id>.jsonl`.
 - `sessionId` in JSONL entries matches the UUID filename used by `claude --resume`.
 
