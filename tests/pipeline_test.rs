@@ -1,7 +1,9 @@
-//! Unit tests for `ConversionPipeline` using mock providers.
+//! Tests for `ConversionPipeline`: mock-based error injection and real-provider
+//! integration tests.
 //!
-//! These tests target pipeline orchestration branches without touching real
-//! provider homes.
+//! Mock-based tests (first section) inject controlled failures that real
+//! providers can't produce on demand. Real-provider tests (second section)
+//! exercise the full pipeline with real CC/Codex/Gemini providers.
 
 use std::{
     collections::HashMap,
@@ -16,6 +18,9 @@ use casr::{
     model::{CanonicalMessage, CanonicalSession, MessageRole, ToolResult},
     pipeline::{ConversionPipeline, ConvertOptions, validate_session},
     providers::{Provider, WriteOptions, WrittenSession},
+    providers::claude_code::ClaudeCode,
+    providers::codex::Codex,
+    providers::gemini::Gemini,
 };
 
 #[derive(Clone)]
@@ -791,4 +796,295 @@ fn validate_session_reports_tool_call_info_when_present() {
         "expected tool-call info line; got {:?}",
         validation.info
     );
+}
+
+// ===========================================================================
+// Real-provider pipeline tests (no mocks)
+//
+// These exercise the full ConversionPipeline with real providers operating on
+// real fixture files in temp directories. Error-injection tests above still
+// use MockProvider because real providers don't fail predictably.
+// ===========================================================================
+
+use std::sync::LazyLock;
+
+static CC_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static CODEX_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static GEMINI_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+struct EnvGuard {
+    key: &'static str,
+    original: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &Path) -> Self {
+        let original = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, value) };
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(val) => unsafe { std::env::set_var(self.key, val) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
+
+fn fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+fn seed_cc_fixture(claude_home: &Path) -> String {
+    let src = fixtures_dir().join("claude_code/cc_simple.jsonl");
+    let first_line: serde_json::Value = {
+        let content = std::fs::read_to_string(&src).expect("read cc_simple fixture");
+        serde_json::from_str(content.lines().next().unwrap()).expect("parse first line")
+    };
+    let session_id = first_line["sessionId"].as_str().unwrap_or("cc-simple-001");
+    let cwd = first_line["cwd"].as_str().unwrap_or("/tmp");
+    let project_key = cwd.replace(|c: char| !c.is_alphanumeric(), "-");
+    let target_dir = claude_home.join(format!("projects/{project_key}"));
+    fs::create_dir_all(&target_dir).expect("create CC project dir");
+    fs::copy(&src, target_dir.join(format!("{session_id}.jsonl"))).expect("copy CC fixture");
+    session_id.to_string()
+}
+
+#[test]
+fn pipeline_real_cc_to_codex_happy_path() {
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let _codex_lock = CODEX_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", &tmp.path().join("claude"));
+    let _codex_env = EnvGuard::set("CODEX_HOME", &tmp.path().join("codex"));
+
+    let cc_sid = seed_cc_fixture(&tmp.path().join("claude"));
+
+    let pipeline = ConversionPipeline {
+        registry: ProviderRegistry::new(vec![Box::new(ClaudeCode), Box::new(Codex)]),
+    };
+
+    let result = pipeline
+        .convert(
+            "cod",
+            &cc_sid,
+            ConvertOptions {
+                dry_run: false,
+                force: false,
+                verbose: false,
+                enrich: false,
+                source_hint: None,
+            },
+        )
+        .expect("real CC→Codex pipeline should succeed");
+
+    assert_eq!(result.source_provider, "claude-code");
+    assert_eq!(result.target_provider, "codex");
+    assert!(result.written.is_some(), "should have written output");
+    let written = result.written.unwrap();
+    assert!(!written.session_id.is_empty(), "target session_id should be set");
+    assert!(written.paths[0].exists(), "written Codex file should exist");
+}
+
+#[test]
+fn pipeline_real_cc_to_gemini_happy_path() {
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let _gemini_lock = GEMINI_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", &tmp.path().join("claude"));
+    let _gemini_env = EnvGuard::set("GEMINI_HOME", &tmp.path().join("gemini"));
+
+    let cc_sid = seed_cc_fixture(&tmp.path().join("claude"));
+
+    let pipeline = ConversionPipeline {
+        registry: ProviderRegistry::new(vec![Box::new(ClaudeCode), Box::new(Gemini)]),
+    };
+
+    let result = pipeline
+        .convert(
+            "gmi",
+            &cc_sid,
+            ConvertOptions {
+                dry_run: false,
+                force: false,
+                verbose: false,
+                enrich: false,
+                source_hint: None,
+            },
+        )
+        .expect("real CC→Gemini pipeline should succeed");
+
+    assert_eq!(result.source_provider, "claude-code");
+    assert_eq!(result.target_provider, "gemini");
+    assert!(result.written.is_some());
+}
+
+#[test]
+fn pipeline_real_dry_run_skips_write() {
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let _codex_lock = CODEX_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", &tmp.path().join("claude"));
+    let _codex_env = EnvGuard::set("CODEX_HOME", &tmp.path().join("codex"));
+
+    let cc_sid = seed_cc_fixture(&tmp.path().join("claude"));
+
+    let pipeline = ConversionPipeline {
+        registry: ProviderRegistry::new(vec![Box::new(ClaudeCode), Box::new(Codex)]),
+    };
+
+    let result = pipeline
+        .convert(
+            "cod",
+            &cc_sid,
+            ConvertOptions {
+                dry_run: true,
+                force: false,
+                verbose: false,
+                enrich: false,
+                source_hint: None,
+            },
+        )
+        .expect("real dry-run should succeed");
+
+    assert!(result.written.is_none(), "dry-run should not write");
+    // No Codex session files should exist.
+    let codex_sessions = tmp.path().join("codex/sessions");
+    assert!(!codex_sessions.exists(), "dry-run should not create codex session dir");
+}
+
+#[test]
+fn pipeline_real_same_provider_short_circuit() {
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", &tmp.path().join("claude"));
+
+    let cc_sid = seed_cc_fixture(&tmp.path().join("claude"));
+
+    let pipeline = ConversionPipeline {
+        registry: ProviderRegistry::new(vec![Box::new(ClaudeCode)]),
+    };
+
+    let result = pipeline
+        .convert(
+            "cc",
+            &cc_sid,
+            ConvertOptions {
+                dry_run: false,
+                force: false,
+                verbose: false,
+                enrich: false,
+                source_hint: None,
+            },
+        )
+        .expect("real same-provider should short-circuit");
+
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("Source and target provider are the same")),
+        "expected same-provider warning; got {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn pipeline_real_source_hint_narrows_resolution() {
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let _codex_lock = CODEX_ENV.lock().unwrap();
+    let _gemini_lock = GEMINI_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", &tmp.path().join("claude"));
+    let _codex_env = EnvGuard::set("CODEX_HOME", &tmp.path().join("codex"));
+    let _gemini_env = EnvGuard::set("GEMINI_HOME", &tmp.path().join("gemini"));
+
+    let cc_sid = seed_cc_fixture(&tmp.path().join("claude"));
+
+    let pipeline = ConversionPipeline {
+        registry: ProviderRegistry::new(vec![
+            Box::new(ClaudeCode),
+            Box::new(Codex),
+            Box::new(Gemini),
+        ]),
+    };
+
+    let result = pipeline
+        .convert(
+            "gmi",
+            &cc_sid,
+            ConvertOptions {
+                dry_run: false,
+                force: false,
+                verbose: false,
+                enrich: false,
+                source_hint: Some("cc".to_string()),
+            },
+        )
+        .expect("source hint 'cc' should resolve to ClaudeCode");
+
+    assert_eq!(result.source_provider, "claude-code");
+    assert_eq!(result.target_provider, "gemini");
+    assert!(result.written.is_some());
+}
+
+#[test]
+fn pipeline_real_session_not_found() {
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let _codex_lock = CODEX_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", &tmp.path().join("claude"));
+    let _codex_env = EnvGuard::set("CODEX_HOME", &tmp.path().join("codex"));
+
+    let pipeline = ConversionPipeline {
+        registry: ProviderRegistry::new(vec![Box::new(ClaudeCode), Box::new(Codex)]),
+    };
+
+    let err = pipeline
+        .convert(
+            "cod",
+            "nonexistent-session-id",
+            ConvertOptions {
+                dry_run: false,
+                force: false,
+                verbose: false,
+                enrich: false,
+                source_hint: None,
+            },
+        )
+        .expect_err("real not-found should error");
+
+    assert!(matches!(
+        err.downcast_ref::<CasrError>(),
+        Some(CasrError::SessionNotFound { .. })
+    ));
+}
+
+#[test]
+fn pipeline_real_unknown_target_alias() {
+    let pipeline = ConversionPipeline {
+        registry: ProviderRegistry::new(vec![Box::new(ClaudeCode)]),
+    };
+
+    let err = pipeline
+        .convert(
+            "nonexistent-alias",
+            "any-session",
+            ConvertOptions {
+                dry_run: false,
+                force: false,
+                verbose: false,
+                enrich: false,
+                source_hint: None,
+            },
+        )
+        .expect_err("unknown alias should error");
+
+    assert!(matches!(
+        err.downcast_ref::<CasrError>(),
+        Some(CasrError::UnknownProviderAlias { .. })
+    ));
 }
