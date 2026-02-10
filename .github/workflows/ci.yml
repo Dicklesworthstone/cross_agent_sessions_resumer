@@ -54,6 +54,42 @@ jobs:
         env:
           NO_COLOR: "1"
 
+  test-report:
+    name: Test Report (JSON)
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests (libtest JSONL)
+        run: |
+          set -euo pipefail
+          cargo test --all-targets -- \
+            --test-threads=1 \
+            -Z unstable-options \
+            --format json \
+            --report-time \
+            --show-output \
+            | grep -E '^[[:space:]]*\\{' \
+            | tee test-report.jsonl
+        env:
+          NO_COLOR: "1"
+
+      - name: Generate consolidated JSON report
+        run: python3 scripts/test_report.py --input test-report.jsonl --output test-report.json
+
+      - name: Upload test report artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: casr-test-report
+          path: |
+            test-report.json
+            test-report.jsonl
+
   coverage:
     name: Coverage (llvm-cov)
     runs-on: ubuntu-latest
