@@ -63,12 +63,9 @@ impl OpenClaw {
                 let parts: Vec<String> = arr
                     .iter()
                     .filter_map(|block| {
-                        let block_type =
-                            block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
                         match block_type {
-                            "text" => {
-                                block.get("text").and_then(|t| t.as_str()).map(String::from)
-                            }
+                            "text" => block.get("text").and_then(|t| t.as_str()).map(String::from),
                             "toolCall" => {
                                 let name = block
                                     .get("name")
@@ -145,7 +142,10 @@ impl Provider for OpenClaw {
         let evidence = if root.is_dir() {
             vec![format!("sessions directory found: {}", root.display())]
         } else if parent_exists {
-            vec![format!("parent directory found (sessions dir not yet created): {}", root.display())]
+            vec![format!(
+                "parent directory found (sessions dir not yet created): {}",
+                root.display()
+            )]
         } else {
             vec![]
         };
@@ -239,8 +239,7 @@ impl Provider for OpenClaw {
 
             match line_type {
                 "session" => {
-                    session_cwd =
-                        val.get("cwd").and_then(|v| v.as_str()).map(String::from);
+                    session_cwd = val.get("cwd").and_then(|v| v.as_str()).map(String::from);
                     if let Some(ts) = val.get("timestamp").and_then(parse_timestamp) {
                         started_at = Some(ts);
                     }
@@ -258,9 +257,7 @@ impl Provider for OpenClaw {
                     let role = normalize_role(role_str);
 
                     let content_val = msg.get("content");
-                    let content = content_val
-                        .map(Self::flatten_content)
-                        .unwrap_or_default();
+                    let content = content_val.map(Self::flatten_content).unwrap_or_default();
 
                     if content.trim().is_empty() {
                         continue;
@@ -283,10 +280,7 @@ impl Provider for OpenClaw {
                         ended_at = ts;
                     }
 
-                    let author = msg
-                        .get("model")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
+                    let author = msg.get("model").and_then(|v| v.as_str()).map(String::from);
 
                     if author.is_some() && model_name.is_none() {
                         model_name = author.clone();
@@ -386,7 +380,7 @@ impl Provider for OpenClaw {
             "type": "session",
             "id": session_id,
             "timestamp": session.started_at
-                .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts))
+                .and_then(chrono::DateTime::from_timestamp_millis)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
             "cwd": workspace,
@@ -444,7 +438,7 @@ impl Provider for OpenClaw {
 
             let ts_str = msg
                 .timestamp
-                .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts))
+                .and_then(chrono::DateTime::from_timestamp_millis)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
@@ -603,7 +597,9 @@ mod tests {
         let path = write_jsonl(
             tmp.path(),
             "my-openclaw-session.jsonl",
-            &[r#"{"type":"message","id":"m1","timestamp":"2026-02-01T16:00:00Z","message":{"role":"user","content":"test"}}"#],
+            &[
+                r#"{"type":"message","id":"m1","timestamp":"2026-02-01T16:00:00Z","message":{"role":"user","content":"test"}}"#,
+            ],
         );
         let provider = OpenClaw;
         let session = provider.read_session(&path).unwrap();
@@ -689,9 +685,7 @@ mod tests {
 
     fn write_and_read_back(session: &CanonicalSession) -> CanonicalSession {
         let tmp = tempfile::tempdir().unwrap();
-        let target = tmp
-            .path()
-            .join(format!("{}.jsonl", session.session_id));
+        let target = tmp.path().join(format!("{}.jsonl", session.session_id));
         let provider = OpenClaw;
 
         // Build content and write manually to avoid env var issues.
@@ -706,7 +700,7 @@ mod tests {
             "type": "session",
             "id": session.session_id,
             "timestamp": session.started_at
-                .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts))
+                .and_then(chrono::DateTime::from_timestamp_millis)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
             "cwd": workspace,
@@ -723,7 +717,7 @@ mod tests {
             };
             let ts_str = msg
                 .timestamp
-                .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts))
+                .and_then(chrono::DateTime::from_timestamp_millis)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
@@ -806,7 +800,10 @@ mod tests {
             readback.messages[1].author,
             Some("claude-3-opus".to_string())
         );
-        assert_eq!(readback.workspace, Some(PathBuf::from("/home/user/project")));
+        assert_eq!(
+            readback.workspace,
+            Some(PathBuf::from("/home/user/project"))
+        );
     }
 
     #[test]

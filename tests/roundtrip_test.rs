@@ -26,14 +26,14 @@ use std::sync::{LazyLock, Mutex};
 use casr::model::{CanonicalSession, MessageRole};
 use casr::providers::aider::Aider;
 use casr::providers::amp::Amp;
+use casr::providers::chatgpt::ChatGpt;
 use casr::providers::claude_code::ClaudeCode;
+use casr::providers::clawdbot::ClawdBot;
 use casr::providers::cline::Cline;
 use casr::providers::codex::Codex;
 use casr::providers::cursor::Cursor;
-use casr::providers::gemini::Gemini;
-use casr::providers::chatgpt::ChatGpt;
-use casr::providers::clawdbot::ClawdBot;
 use casr::providers::factory::Factory;
+use casr::providers::gemini::Gemini;
 use casr::providers::openclaw::OpenClaw;
 use casr::providers::opencode::OpenCode;
 use casr::providers::pi_agent::PiAgent;
@@ -812,14 +812,18 @@ fn roundtrip_chatgpt_to_cc() {
         .write_session(&original, &WriteOptions { force: false })
         .expect("seed CC→ChatGPT write");
 
-    let gpt_session = ChatGpt.read_session(&written.paths[0]).expect("read ChatGPT");
+    let gpt_session = ChatGpt
+        .read_session(&written.paths[0])
+        .expect("read ChatGPT");
 
     // Target: ChatGPT → CC.
     let cc_written = ClaudeCode
         .write_session(&gpt_session, &WriteOptions { force: false })
         .expect("ChatGPT→CC write");
 
-    let readback = ClaudeCode.read_session(&cc_written.paths[0]).expect("read CC back");
+    let readback = ClaudeCode
+        .read_session(&cc_written.paths[0])
+        .expect("read CC back");
 
     assert_roundtrip_fidelity(&original, &readback, "ChatGPT→CC");
 }
@@ -860,13 +864,17 @@ fn roundtrip_clawdbot_to_cc() {
         .write_session(&original, &WriteOptions { force: false })
         .expect("seed CC→ClawdBot write");
 
-    let cwb_session = ClawdBot.read_session(&written.paths[0]).expect("read ClawdBot");
+    let cwb_session = ClawdBot
+        .read_session(&written.paths[0])
+        .expect("read ClawdBot");
 
     let cc_written = ClaudeCode
         .write_session(&cwb_session, &WriteOptions { force: false })
         .expect("ClawdBot→CC write");
 
-    let readback = ClaudeCode.read_session(&cc_written.paths[0]).expect("read CC back");
+    let readback = ClaudeCode
+        .read_session(&cc_written.paths[0])
+        .expect("read CC back");
 
     assert_roundtrip_fidelity(&original, &readback, "ClawdBot→CC");
 }
@@ -893,6 +901,33 @@ fn roundtrip_cc_to_vibe() {
     assert_roundtrip_fidelity(&original, &readback, "CC→Vibe");
 }
 
+#[test]
+fn roundtrip_vibe_to_cc() {
+    let _lock_vib = VIBE_ENV.lock().unwrap();
+    let _lock_cc = CC_ENV.lock().unwrap();
+    let tmp_vib = tempfile::TempDir::new().unwrap();
+    let tmp_cc = tempfile::TempDir::new().unwrap();
+    let _env_vib = EnvGuard::set("VIBE_HOME", tmp_vib.path());
+    let _env_cc = EnvGuard::set("CLAUDE_HOME", tmp_cc.path());
+
+    let original = read_cc_fixture("cc_simple");
+    let written = Vibe
+        .write_session(&original, &WriteOptions { force: false })
+        .expect("seed CC→Vibe write");
+
+    let vib_session = Vibe.read_session(&written.paths[0]).expect("read Vibe");
+
+    let cc_written = ClaudeCode
+        .write_session(&vib_session, &WriteOptions { force: false })
+        .expect("Vibe→CC write");
+
+    let readback = ClaudeCode
+        .read_session(&cc_written.paths[0])
+        .expect("read CC back");
+
+    assert_roundtrip_fidelity(&original, &readback, "Vibe→CC");
+}
+
 // ===========================================================================
 // Factory roundtrips
 // ===========================================================================
@@ -913,6 +948,35 @@ fn roundtrip_cc_to_factory() {
         .expect("CC→Factory: read-back should succeed");
 
     assert_roundtrip_fidelity(&original, &readback, "CC→Factory");
+}
+
+#[test]
+fn roundtrip_factory_to_cc() {
+    let _lock_fac = FACTORY_ENV.lock().unwrap();
+    let _lock_cc = CC_ENV.lock().unwrap();
+    let tmp_fac = tempfile::TempDir::new().unwrap();
+    let tmp_cc = tempfile::TempDir::new().unwrap();
+    let _env_fac = EnvGuard::set("FACTORY_HOME", tmp_fac.path());
+    let _env_cc = EnvGuard::set("CLAUDE_HOME", tmp_cc.path());
+
+    let original = read_cc_fixture("cc_simple");
+    let written = Factory
+        .write_session(&original, &WriteOptions { force: false })
+        .expect("seed CC→Factory write");
+
+    let fac_session = Factory
+        .read_session(&written.paths[0])
+        .expect("read Factory");
+
+    let cc_written = ClaudeCode
+        .write_session(&fac_session, &WriteOptions { force: false })
+        .expect("Factory→CC write");
+
+    let readback = ClaudeCode
+        .read_session(&cc_written.paths[0])
+        .expect("read CC back");
+
+    assert_roundtrip_fidelity(&original, &readback, "Factory→CC");
 }
 
 // ===========================================================================
@@ -951,13 +1015,17 @@ fn roundtrip_openclaw_to_cc() {
         .write_session(&original, &WriteOptions { force: false })
         .expect("seed CC→OpenClaw write");
 
-    let ocl_session = OpenClaw.read_session(&written.paths[0]).expect("read OpenClaw");
+    let ocl_session = OpenClaw
+        .read_session(&written.paths[0])
+        .expect("read OpenClaw");
 
     let cc_written = ClaudeCode
         .write_session(&ocl_session, &WriteOptions { force: false })
         .expect("OpenClaw→CC write");
 
-    let readback = ClaudeCode.read_session(&cc_written.paths[0]).expect("read CC back");
+    let readback = ClaudeCode
+        .read_session(&cc_written.paths[0])
+        .expect("read CC back");
 
     assert_roundtrip_fidelity(&original, &readback, "OpenClaw→CC");
 }
@@ -998,13 +1066,17 @@ fn roundtrip_piagent_to_cc() {
         .write_session(&original, &WriteOptions { force: false })
         .expect("seed CC→PiAgent write");
 
-    let pi_session = PiAgent.read_session(&written.paths[0]).expect("read PiAgent");
+    let pi_session = PiAgent
+        .read_session(&written.paths[0])
+        .expect("read PiAgent");
 
     let cc_written = ClaudeCode
         .write_session(&pi_session, &WriteOptions { force: false })
         .expect("PiAgent→CC write");
 
-    let readback = ClaudeCode.read_session(&cc_written.paths[0]).expect("read CC back");
+    let readback = ClaudeCode
+        .read_session(&cc_written.paths[0])
+        .expect("read CC back");
 
     assert_roundtrip_fidelity(&original, &readback, "PiAgent→CC");
 }

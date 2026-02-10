@@ -241,12 +241,15 @@ impl Provider for PiAgent {
                 "session" => {
                     session_id_from_header =
                         val.get("id").and_then(|v| v.as_str()).map(String::from);
-                    session_cwd =
-                        val.get("cwd").and_then(|v| v.as_str()).map(String::from);
-                    provider_name =
-                        val.get("provider").and_then(|v| v.as_str()).map(String::from);
-                    model_id =
-                        val.get("modelId").and_then(|v| v.as_str()).map(String::from);
+                    session_cwd = val.get("cwd").and_then(|v| v.as_str()).map(String::from);
+                    provider_name = val
+                        .get("provider")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    model_id = val
+                        .get("modelId")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
                     if let Some(ts) = val.get("timestamp").and_then(parse_timestamp) {
                         started_at = Some(ts);
                     }
@@ -269,9 +272,7 @@ impl Provider for PiAgent {
                     let role = normalize_role(normalized);
 
                     let content_val = msg.get("content");
-                    let content = content_val
-                        .map(Self::flatten_content)
-                        .unwrap_or_default();
+                    let content = content_val.map(Self::flatten_content).unwrap_or_default();
 
                     if content.trim().is_empty() {
                         continue;
@@ -415,7 +416,7 @@ impl Provider for PiAgent {
             "type": "session",
             "id": session_id,
             "timestamp": session.started_at
-                .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts))
+                .and_then(chrono::DateTime::from_timestamp_millis)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
             "cwd": workspace,
@@ -464,7 +465,7 @@ impl Provider for PiAgent {
 
             let ts_str = msg
                 .timestamp
-                .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts))
+                .and_then(chrono::DateTime::from_timestamp_millis)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
@@ -589,7 +590,11 @@ mod tests {
         );
         let session = read_piagent(&[&line]);
 
-        assert!(session.messages[0].content.contains("[Thinking] Let me analyze..."));
+        assert!(
+            session.messages[0]
+                .content
+                .contains("[Thinking] Let me analyze...")
+        );
         assert!(session.messages[0].content.contains("Here's my answer."));
     }
 
@@ -736,10 +741,7 @@ mod tests {
             r#"{"type":"session","modelId":"gpt-4-turbo"}"#,
             r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"assistant","content":"Hello!"}}"#,
         ]);
-        assert_eq!(
-            session.messages[0].author,
-            Some("gpt-4-turbo".to_string())
-        );
+        assert_eq!(session.messages[0].author, Some("gpt-4-turbo".to_string()));
     }
 
     #[test]
@@ -785,7 +787,7 @@ mod tests {
             "type": "session",
             "id": sid,
             "timestamp": session.started_at
-                .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts))
+                .and_then(chrono::DateTime::from_timestamp_millis)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
             "cwd": workspace,
@@ -802,7 +804,7 @@ mod tests {
             };
             let ts_str = msg
                 .timestamp
-                .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts))
+                .and_then(chrono::DateTime::from_timestamp_millis)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 

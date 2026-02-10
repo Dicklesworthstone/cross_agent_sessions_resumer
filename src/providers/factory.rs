@@ -250,13 +250,11 @@ impl Provider for Factory {
 
         // Load settings file for model info.
         let settings_path = path.with_extension("settings.json");
-        if settings_path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&settings_path) {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                    model_from_settings =
-                        val.get("model").and_then(|m| m.as_str()).map(String::from);
-                }
-            }
+        if settings_path.is_file()
+            && let Ok(content) = std::fs::read_to_string(&settings_path)
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+        {
+            model_from_settings = val.get("model").and_then(|m| m.as_str()).map(String::from);
         }
 
         let metadata = serde_json::json!({

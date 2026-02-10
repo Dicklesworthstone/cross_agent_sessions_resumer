@@ -848,6 +848,373 @@ fn cli_resume_opencode_to_cc_works_with_source_hint() {
 }
 
 // ---------------------------------------------------------------------------
+// ChatGPT conversions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_resume_cc_to_chatgpt_works_and_is_discoverable() {
+    let tmp = TempDir::new().unwrap();
+    let session_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "resume", "gpt", &session_id])
+        .output()
+        .expect("resume should run");
+    assert!(
+        output.status.success(),
+        "CC→ChatGPT conversion should succeed"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("resume --json output should parse");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["target_provider"].as_str().unwrap(), "chatgpt");
+    let gpt_session_id = parsed["target_session_id"]
+        .as_str()
+        .expect("target_session_id should be present for non-dry-run");
+
+    casr_cmd(&tmp)
+        .args(["--json", "info", gpt_session_id])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cli_resume_chatgpt_to_cc_works_with_source_hint() {
+    let tmp = TempDir::new().unwrap();
+    let source_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let gpt_result = casr_cmd(&tmp)
+        .args(["--json", "resume", "gpt", &source_id])
+        .output()
+        .expect("CC→ChatGPT seed conversion should run");
+    assert!(gpt_result.status.success());
+    let gpt_json: serde_json::Value =
+        serde_json::from_slice(&gpt_result.stdout).expect("seed conversion JSON should parse");
+    let gpt_session_id = gpt_json["target_session_id"]
+        .as_str()
+        .expect("chatgpt target_session_id should be present");
+
+    casr_cmd(&tmp)
+        .args(["resume", "cc", gpt_session_id, "--source", "gpt"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Converted"))
+        .stdout(predicate::str::contains("chatgpt"))
+        .stdout(predicate::str::contains("claude-code"));
+}
+
+// ---------------------------------------------------------------------------
+// ClawdBot conversions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_resume_cc_to_clawdbot_works_and_is_discoverable() {
+    let tmp = TempDir::new().unwrap();
+    let session_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "resume", "cwb", &session_id])
+        .output()
+        .expect("resume should run");
+    assert!(
+        output.status.success(),
+        "CC→ClawdBot conversion should succeed"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("resume --json output should parse");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["target_provider"].as_str().unwrap(), "clawdbot");
+    assert!(parsed["target_session_id"].as_str().is_some());
+
+    // Verify written file exists on disk.
+    let written_paths = parsed["written_paths"].as_array().unwrap();
+    assert!(!written_paths.is_empty(), "should have written paths");
+    let path = std::path::Path::new(written_paths[0].as_str().unwrap());
+    assert!(path.exists(), "ClawdBot output file should exist on disk");
+}
+
+#[test]
+fn cli_resume_clawdbot_to_cc_works_with_source_hint() {
+    let tmp = TempDir::new().unwrap();
+    let source_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let cwb_result = casr_cmd(&tmp)
+        .args(["--json", "resume", "cwb", &source_id])
+        .output()
+        .expect("CC→ClawdBot seed conversion should run");
+    assert!(cwb_result.status.success());
+    let cwb_json: serde_json::Value =
+        serde_json::from_slice(&cwb_result.stdout).expect("seed conversion JSON should parse");
+    let cwb_session_id = cwb_json["target_session_id"]
+        .as_str()
+        .expect("clawdbot target_session_id should be present");
+
+    // Use --force since the session ID may match the source CC session.
+    casr_cmd(&tmp)
+        .args(["resume", "cc", cwb_session_id, "--source", "cwb", "--force"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Converted"))
+        .stdout(predicate::str::contains("clawdbot"))
+        .stdout(predicate::str::contains("claude-code"));
+}
+
+// ---------------------------------------------------------------------------
+// Vibe conversions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_resume_cc_to_vibe_works_and_is_discoverable() {
+    let tmp = TempDir::new().unwrap();
+    let session_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "resume", "vib", &session_id])
+        .output()
+        .expect("resume should run");
+    assert!(output.status.success(), "CC→Vibe conversion should succeed");
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("resume --json output should parse");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["target_provider"].as_str().unwrap(), "vibe");
+    assert!(parsed["target_session_id"].as_str().is_some());
+
+    // Verify written file exists on disk.
+    let written_paths = parsed["written_paths"].as_array().unwrap();
+    assert!(!written_paths.is_empty(), "should have written paths");
+    let path = std::path::Path::new(written_paths[0].as_str().unwrap());
+    assert!(path.exists(), "Vibe output file should exist on disk");
+}
+
+#[test]
+fn cli_resume_vibe_to_cc_works_with_source_hint() {
+    let tmp = TempDir::new().unwrap();
+    let source_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let vibe_result = casr_cmd(&tmp)
+        .args(["--json", "resume", "vib", &source_id])
+        .output()
+        .expect("CC→Vibe seed conversion should run");
+    assert!(vibe_result.status.success());
+    let vibe_json: serde_json::Value =
+        serde_json::from_slice(&vibe_result.stdout).expect("seed conversion JSON should parse");
+    let vibe_session_id = vibe_json["target_session_id"]
+        .as_str()
+        .expect("vibe target_session_id should be present");
+
+    // Use --force since the session ID may match the source CC session.
+    casr_cmd(&tmp)
+        .args([
+            "resume",
+            "cc",
+            vibe_session_id,
+            "--source",
+            "vib",
+            "--force",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Converted"))
+        .stdout(predicate::str::contains("vibe"))
+        .stdout(predicate::str::contains("claude-code"));
+}
+
+// ---------------------------------------------------------------------------
+// Factory conversions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_resume_cc_to_factory_works_and_is_discoverable() {
+    let tmp = TempDir::new().unwrap();
+    let session_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "resume", "fac", &session_id])
+        .output()
+        .expect("resume should run");
+    assert!(
+        output.status.success(),
+        "CC→Factory conversion should succeed"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("resume --json output should parse");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["target_provider"].as_str().unwrap(), "factory");
+    assert!(parsed["target_session_id"].as_str().is_some());
+
+    // Verify written file exists on disk.
+    let written_paths = parsed["written_paths"].as_array().unwrap();
+    assert!(!written_paths.is_empty(), "should have written paths");
+    let path = std::path::Path::new(written_paths[0].as_str().unwrap());
+    assert!(path.exists(), "Factory output file should exist on disk");
+}
+
+#[test]
+fn cli_resume_factory_to_cc_works_with_source_hint() {
+    let tmp = TempDir::new().unwrap();
+    let source_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let factory_result = casr_cmd(&tmp)
+        .args(["--json", "resume", "fac", &source_id])
+        .output()
+        .expect("CC→Factory seed conversion should run");
+    assert!(factory_result.status.success());
+    let factory_json: serde_json::Value =
+        serde_json::from_slice(&factory_result.stdout).expect("seed conversion JSON should parse");
+    let factory_session_id = factory_json["target_session_id"]
+        .as_str()
+        .expect("factory target_session_id should be present");
+
+    // Use --force since the session ID may match the source CC session.
+    casr_cmd(&tmp)
+        .args([
+            "resume",
+            "cc",
+            factory_session_id,
+            "--source",
+            "fac",
+            "--force",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Converted"))
+        .stdout(predicate::str::contains("factory"))
+        .stdout(predicate::str::contains("claude-code"));
+}
+
+// ---------------------------------------------------------------------------
+// OpenClaw conversions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_resume_cc_to_openclaw_works_and_is_discoverable() {
+    let tmp = TempDir::new().unwrap();
+    let session_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "resume", "ocl", &session_id])
+        .output()
+        .expect("resume should run");
+    assert!(
+        output.status.success(),
+        "CC→OpenClaw conversion should succeed"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("resume --json output should parse");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["target_provider"].as_str().unwrap(), "openclaw");
+    assert!(parsed["target_session_id"].as_str().is_some());
+
+    // Verify written file exists on disk.
+    let written_paths = parsed["written_paths"].as_array().unwrap();
+    assert!(!written_paths.is_empty(), "should have written paths");
+    let path = std::path::Path::new(written_paths[0].as_str().unwrap());
+    assert!(path.exists(), "OpenClaw output file should exist on disk");
+}
+
+#[test]
+fn cli_resume_openclaw_to_cc_works_with_source_hint() {
+    let tmp = TempDir::new().unwrap();
+    let source_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let openclaw_result = casr_cmd(&tmp)
+        .args(["--json", "resume", "ocl", &source_id])
+        .output()
+        .expect("CC→OpenClaw seed conversion should run");
+    assert!(openclaw_result.status.success());
+    let openclaw_json: serde_json::Value =
+        serde_json::from_slice(&openclaw_result.stdout).expect("seed conversion JSON should parse");
+    let openclaw_session_id = openclaw_json["target_session_id"]
+        .as_str()
+        .expect("openclaw target_session_id should be present");
+
+    // Use --force since the session ID may match the source CC session.
+    casr_cmd(&tmp)
+        .args([
+            "resume",
+            "cc",
+            openclaw_session_id,
+            "--source",
+            "ocl",
+            "--force",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Converted"))
+        .stdout(predicate::str::contains("openclaw"))
+        .stdout(predicate::str::contains("claude-code"));
+}
+
+// ---------------------------------------------------------------------------
+// Pi-Agent conversions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_resume_cc_to_piagent_works_and_is_discoverable() {
+    let tmp = TempDir::new().unwrap();
+    let session_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "resume", "pi", &session_id])
+        .output()
+        .expect("resume should run");
+    assert!(
+        output.status.success(),
+        "CC→PiAgent conversion should succeed"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("resume --json output should parse");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["target_provider"].as_str().unwrap(), "pi-agent");
+    assert!(parsed["target_session_id"].as_str().is_some());
+
+    // Verify written file exists on disk.
+    let written_paths = parsed["written_paths"].as_array().unwrap();
+    assert!(!written_paths.is_empty(), "should have written paths");
+    let path = std::path::Path::new(written_paths[0].as_str().unwrap());
+    assert!(path.exists(), "PiAgent output file should exist on disk");
+}
+
+#[test]
+fn cli_resume_piagent_to_cc_works_with_source_hint() {
+    let tmp = TempDir::new().unwrap();
+    let source_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let piagent_result = casr_cmd(&tmp)
+        .args(["--json", "resume", "pi", &source_id])
+        .output()
+        .expect("CC→PiAgent seed conversion should run");
+    assert!(piagent_result.status.success());
+    let piagent_json: serde_json::Value =
+        serde_json::from_slice(&piagent_result.stdout).expect("seed conversion JSON should parse");
+    let piagent_session_id = piagent_json["target_session_id"]
+        .as_str()
+        .expect("piagent target_session_id should be present");
+
+    // Use --force since the session ID may match the source CC session.
+    casr_cmd(&tmp)
+        .args([
+            "resume",
+            "cc",
+            piagent_session_id,
+            "--source",
+            "pi",
+            "--force",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Converted"))
+        .stdout(predicate::str::contains("pi-agent"))
+        .stdout(predicate::str::contains("claude-code"));
+}
+
+// ---------------------------------------------------------------------------
 // Completions command
 // ---------------------------------------------------------------------------
 

@@ -14,10 +14,16 @@ use std::sync::{LazyLock, Mutex};
 
 use casr::model::{CanonicalMessage, CanonicalSession, MessageRole, ToolCall};
 use casr::providers::amp::Amp;
+use casr::providers::chatgpt::ChatGpt;
 use casr::providers::claude_code::ClaudeCode;
+use casr::providers::clawdbot::ClawdBot;
 use casr::providers::cline::Cline;
 use casr::providers::codex::Codex;
+use casr::providers::factory::Factory;
 use casr::providers::gemini::Gemini;
+use casr::providers::openclaw::OpenClaw;
+use casr::providers::pi_agent::PiAgent;
+use casr::providers::vibe::Vibe;
 use casr::providers::{Provider, WriteOptions};
 
 // ---------------------------------------------------------------------------
@@ -29,6 +35,12 @@ static CODEX_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static GEMINI_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static CLINE_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static AMP_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static CHATGPT_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static CLAWDBOT_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static VIBE_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static FACTORY_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static OPENCLAW_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static PI_AGENT_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// RAII guard that sets an env var and restores the original value on drop.
 struct EnvGuard {
@@ -184,8 +196,9 @@ fn writer_cc_output_valid_jsonl() {
     let lines: Vec<&str> = content.lines().collect();
     assert_eq!(lines.len(), 4, "CC should write one line per message");
     for (i, line) in lines.iter().enumerate() {
-        let _: serde_json::Value = serde_json::from_str(line)
-            .unwrap_or_else(|e| panic!("CC line {i} not valid JSON: {e}\nContent: {line}"));
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(line) {
+            panic!("CC line {i} not valid JSON: {e}\nContent: {line}");
+        }
     }
 }
 
@@ -296,11 +309,15 @@ fn writer_cc_timestamps_are_rfc3339() {
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
     for (i, line) in content.lines().enumerate() {
         let entry: serde_json::Value = serde_json::from_str(line).unwrap();
-        let ts_str = entry["timestamp"]
-            .as_str()
-            .unwrap_or_else(|| panic!("CC line {i}: timestamp should be a string"));
-        chrono::DateTime::parse_from_rfc3339(ts_str)
-            .unwrap_or_else(|e| panic!("CC line {i}: timestamp '{ts_str}' not valid RFC3339: {e}"));
+        let ts_str = match entry["timestamp"].as_str() {
+            Some(ts_str) => ts_str,
+            None => {
+                panic!("CC line {i}: timestamp should be a string");
+            }
+        };
+        if let Err(e) = chrono::DateTime::parse_from_rfc3339(ts_str) {
+            panic!("CC line {i}: timestamp '{ts_str}' not valid RFC3339: {e}");
+        }
     }
 }
 
@@ -435,8 +452,9 @@ fn writer_codex_output_valid_jsonl() {
         "Codex should write session_meta + 4 message lines"
     );
     for (i, line) in lines.iter().enumerate() {
-        let _: serde_json::Value = serde_json::from_str(line)
-            .unwrap_or_else(|e| panic!("Codex line {i} not valid JSON: {e}\nContent: {line}"));
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(line) {
+            panic!("Codex line {i} not valid JSON: {e}\nContent: {line}");
+        }
     }
 }
 
@@ -583,9 +601,9 @@ fn writer_codex_timestamps_are_numeric() {
     let content = std::fs::read_to_string(&written.paths[0]).unwrap();
     for (i, line) in content.lines().enumerate() {
         let entry: serde_json::Value = serde_json::from_str(line).unwrap();
-        let ts = entry
-            .get("timestamp")
-            .unwrap_or_else(|| panic!("Codex line {i}: missing timestamp"));
+        let ts = entry.get("timestamp");
+        assert!(ts.is_some(), "Codex line {i}: missing timestamp");
+        let ts = ts.unwrap();
         assert!(
             ts.is_f64() || ts.is_i64() || ts.is_u64(),
             "Codex line {i}: timestamp should be numeric, got: {ts}"
@@ -827,19 +845,23 @@ fn writer_gemini_timestamps_are_rfc3339() {
 
     // Top-level timestamps.
     for field in ["startTime", "lastUpdated"] {
-        let ts = root[field]
-            .as_str()
-            .unwrap_or_else(|| panic!("Gemini: {field} should be string"));
-        chrono::DateTime::parse_from_rfc3339(ts)
-            .unwrap_or_else(|e| panic!("Gemini: {field} '{ts}' not valid RFC3339: {e}"));
+        let ts = match root[field].as_str() {
+            Some(ts) => ts,
+            None => {
+                panic!("Gemini: {field} should be string");
+            }
+        };
+        if let Err(e) = chrono::DateTime::parse_from_rfc3339(ts) {
+            panic!("Gemini: {field} '{ts}' not valid RFC3339: {e}");
+        }
     }
 
     // Per-message timestamps.
     for (i, msg) in root["messages"].as_array().unwrap().iter().enumerate() {
-        if let Some(ts) = msg["timestamp"].as_str() {
-            chrono::DateTime::parse_from_rfc3339(ts).unwrap_or_else(|e| {
-                panic!("Gemini msg {i}: timestamp '{ts}' not valid RFC3339: {e}")
-            });
+        if let Some(ts) = msg["timestamp"].as_str()
+            && let Err(e) = chrono::DateTime::parse_from_rfc3339(ts)
+        {
+            panic!("Gemini msg {i}: timestamp '{ts}' not valid RFC3339: {e}");
         }
     }
 }
@@ -1141,5 +1163,840 @@ fn writer_amp_output_has_expected_shape() {
         root["messages"].as_array().unwrap().len(),
         4,
         "Amp thread should contain one entry per message"
+    );
+}
+
+// ===========================================================================
+// ChatGPT writer tests
+// ===========================================================================
+
+#[test]
+fn writer_chatgpt_roundtrip() {
+    let _lock = CHATGPT_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CHATGPT_HOME", tmp.path());
+
+    let session = simple_session();
+    let written = ChatGpt
+        .write_session(&session, &WriteOptions { force: false })
+        .expect("ChatGPT write_session should succeed");
+
+    assert_eq!(
+        written.paths.len(),
+        1,
+        "ChatGPT should produce exactly one file"
+    );
+    assert!(
+        written.paths[0].exists(),
+        "ChatGPT output file should exist"
+    );
+    assert!(
+        written.resume_command.contains("chatgpt.com"),
+        "ChatGPT resume command should reference chatgpt.com"
+    );
+
+    let readback = ChatGpt
+        .read_session(&written.paths[0])
+        .expect("ChatGPT read_session should parse written output");
+
+    assert_eq!(
+        readback.messages.len(),
+        session.messages.len(),
+        "ChatGPT roundtrip: message count"
+    );
+    for (i, (orig, rb)) in session
+        .messages
+        .iter()
+        .zip(readback.messages.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            orig.role, rb.role,
+            "ChatGPT roundtrip msg {i}: role mismatch"
+        );
+        assert_eq!(
+            orig.content, rb.content,
+            "ChatGPT roundtrip msg {i}: content mismatch"
+        );
+    }
+}
+
+#[test]
+fn writer_chatgpt_output_valid_json_with_mapping() {
+    let _lock = CHATGPT_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CHATGPT_HOME", tmp.path());
+
+    let written = ChatGpt
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let root: serde_json::Value =
+        serde_json::from_str(&content).expect("ChatGPT output should be valid JSON");
+
+    assert!(root["id"].is_string(), "ChatGPT should have string id");
+    assert!(
+        root["mapping"].is_object(),
+        "ChatGPT should have mapping object"
+    );
+
+    let mapping = root["mapping"].as_object().unwrap();
+    // 4 messages → 4 mapping nodes (plus possible root node).
+    assert!(
+        mapping.len() >= 4,
+        "ChatGPT mapping should have at least 4 nodes, got {}",
+        mapping.len()
+    );
+}
+
+#[test]
+fn writer_chatgpt_timestamps_are_float_seconds() {
+    let _lock = CHATGPT_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CHATGPT_HOME", tmp.path());
+
+    let written = ChatGpt
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let root: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    // Top-level timestamps should be numeric (seconds).
+    assert!(
+        root["create_time"].is_f64() || root["create_time"].is_i64(),
+        "ChatGPT create_time should be numeric"
+    );
+    assert!(
+        root["update_time"].is_f64() || root["update_time"].is_i64(),
+        "ChatGPT update_time should be numeric"
+    );
+}
+
+#[test]
+fn writer_chatgpt_mapping_has_parent_chain() {
+    let _lock = CHATGPT_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CHATGPT_HOME", tmp.path());
+
+    let written = ChatGpt
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let root: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let mapping = root["mapping"].as_object().unwrap();
+
+    // Every node with a message should have a parent pointer (string or null).
+    for (node_id, node) in mapping {
+        if node.get("message").is_some() {
+            assert!(
+                node.get("parent").is_some(),
+                "ChatGPT mapping node '{node_id}' should have parent field"
+            );
+        }
+    }
+}
+
+// ===========================================================================
+// ClawdBot writer tests
+// ===========================================================================
+
+#[test]
+fn writer_clawdbot_roundtrip() {
+    let _lock = CLAWDBOT_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CLAWDBOT_HOME", tmp.path());
+
+    let session = simple_session();
+    let written = ClawdBot
+        .write_session(&session, &WriteOptions { force: false })
+        .expect("ClawdBot write_session should succeed");
+
+    assert_eq!(
+        written.paths.len(),
+        1,
+        "ClawdBot should produce exactly one file"
+    );
+    assert!(
+        written.paths[0].exists(),
+        "ClawdBot output file should exist"
+    );
+    assert!(
+        written.resume_command.contains("clawdbot"),
+        "ClawdBot resume command should reference clawdbot"
+    );
+
+    let readback = ClawdBot
+        .read_session(&written.paths[0])
+        .expect("ClawdBot read_session should parse written output");
+
+    assert_eq!(
+        readback.messages.len(),
+        session.messages.len(),
+        "ClawdBot roundtrip: message count"
+    );
+    for (i, (orig, rb)) in session
+        .messages
+        .iter()
+        .zip(readback.messages.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            orig.role, rb.role,
+            "ClawdBot roundtrip msg {i}: role mismatch"
+        );
+        assert_eq!(
+            orig.content, rb.content,
+            "ClawdBot roundtrip msg {i}: content mismatch"
+        );
+    }
+}
+
+#[test]
+fn writer_clawdbot_output_valid_jsonl() {
+    let _lock = CLAWDBOT_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CLAWDBOT_HOME", tmp.path());
+
+    let written = ClawdBot
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 4, "ClawdBot should write one line per message");
+    for (i, line) in lines.iter().enumerate() {
+        let entry: serde_json::Value = match serde_json::from_str(line) {
+            Ok(entry) => entry,
+            Err(e) => {
+                panic!("ClawdBot line {i} not valid JSON: {e}\nContent: {line}");
+            }
+        };
+        assert!(
+            entry["role"].is_string(),
+            "ClawdBot line {i}: should have role"
+        );
+        assert!(
+            entry["content"].is_string(),
+            "ClawdBot line {i}: should have content"
+        );
+    }
+}
+
+#[test]
+fn writer_clawdbot_timestamps_are_rfc3339() {
+    let _lock = CLAWDBOT_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CLAWDBOT_HOME", tmp.path());
+
+    let written = ClawdBot
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    for (i, line) in content.lines().enumerate() {
+        let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+        if let Some(ts_str) = entry["timestamp"].as_str()
+            && let Err(e) = chrono::DateTime::parse_from_rfc3339(ts_str)
+        {
+            panic!("ClawdBot line {i}: timestamp '{ts_str}' not valid RFC3339: {e}");
+        }
+    }
+}
+
+// ===========================================================================
+// Vibe writer tests
+// ===========================================================================
+
+#[test]
+fn writer_vibe_roundtrip() {
+    let _lock = VIBE_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("VIBE_HOME", tmp.path());
+
+    let session = simple_session();
+    let written = Vibe
+        .write_session(&session, &WriteOptions { force: false })
+        .expect("Vibe write_session should succeed");
+
+    assert_eq!(
+        written.paths.len(),
+        1,
+        "Vibe should produce exactly one file"
+    );
+    assert!(written.paths[0].exists(), "Vibe output file should exist");
+    assert!(
+        written.resume_command.contains("vibe"),
+        "Vibe resume command should reference vibe"
+    );
+
+    let readback = Vibe
+        .read_session(&written.paths[0])
+        .expect("Vibe read_session should parse written output");
+
+    assert_eq!(
+        readback.messages.len(),
+        session.messages.len(),
+        "Vibe roundtrip: message count"
+    );
+    for (i, (orig, rb)) in session
+        .messages
+        .iter()
+        .zip(readback.messages.iter())
+        .enumerate()
+    {
+        assert_eq!(orig.role, rb.role, "Vibe roundtrip msg {i}: role mismatch");
+        assert_eq!(
+            orig.content, rb.content,
+            "Vibe roundtrip msg {i}: content mismatch"
+        );
+    }
+}
+
+#[test]
+fn writer_vibe_directory_structure() {
+    let _lock = VIBE_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("VIBE_HOME", tmp.path());
+
+    let written = Vibe
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let path = &written.paths[0];
+    // Should be under <VIBE_HOME>/<session_id>/messages.jsonl
+    let filename = path.file_name().unwrap().to_str().unwrap();
+    assert_eq!(
+        filename, "messages.jsonl",
+        "Vibe output should be named messages.jsonl"
+    );
+    let session_dir = path.parent().unwrap();
+    assert!(
+        session_dir.starts_with(tmp.path()),
+        "Vibe session dir should be under VIBE_HOME"
+    );
+}
+
+#[test]
+fn writer_vibe_output_valid_jsonl() {
+    let _lock = VIBE_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("VIBE_HOME", tmp.path());
+
+    let written = Vibe
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 4, "Vibe should write one line per message");
+    for (i, line) in lines.iter().enumerate() {
+        let entry: serde_json::Value = match serde_json::from_str(line) {
+            Ok(entry) => entry,
+            Err(e) => {
+                panic!("Vibe line {i} not valid JSON: {e}\nContent: {line}");
+            }
+        };
+        assert!(entry["role"].is_string(), "Vibe line {i}: should have role");
+        assert!(
+            entry["content"].is_string(),
+            "Vibe line {i}: should have content"
+        );
+    }
+}
+
+// ===========================================================================
+// Factory writer tests
+// ===========================================================================
+
+#[test]
+fn writer_factory_roundtrip() {
+    let _lock = FACTORY_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("FACTORY_HOME", tmp.path());
+
+    let session = simple_session();
+    let written = Factory
+        .write_session(&session, &WriteOptions { force: false })
+        .expect("Factory write_session should succeed");
+
+    assert_eq!(
+        written.paths.len(),
+        1,
+        "Factory should produce exactly one file"
+    );
+    assert!(
+        written.paths[0].exists(),
+        "Factory output file should exist"
+    );
+    assert!(
+        written.resume_command.contains("factory"),
+        "Factory resume command should reference factory"
+    );
+
+    let readback = Factory
+        .read_session(&written.paths[0])
+        .expect("Factory read_session should parse written output");
+
+    assert_eq!(
+        readback.messages.len(),
+        session.messages.len(),
+        "Factory roundtrip: message count"
+    );
+    for (i, (orig, rb)) in session
+        .messages
+        .iter()
+        .zip(readback.messages.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            orig.role, rb.role,
+            "Factory roundtrip msg {i}: role mismatch"
+        );
+        assert_eq!(
+            orig.content, rb.content,
+            "Factory roundtrip msg {i}: content mismatch"
+        );
+    }
+}
+
+#[test]
+fn writer_factory_session_start_header() {
+    let _lock = FACTORY_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("FACTORY_HOME", tmp.path());
+
+    let written = Factory
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let first_line: serde_json::Value =
+        serde_json::from_str(content.lines().next().unwrap()).unwrap();
+
+    assert_eq!(
+        first_line["type"], "session_start",
+        "Factory first line should be session_start"
+    );
+    assert!(
+        first_line["id"].is_string(),
+        "Factory session_start should have id"
+    );
+    assert!(
+        first_line["cwd"].is_string(),
+        "Factory session_start should have cwd"
+    );
+}
+
+#[test]
+fn writer_factory_output_valid_jsonl() {
+    let _lock = FACTORY_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("FACTORY_HOME", tmp.path());
+
+    let written = Factory
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    // session_start + 4 messages.
+    assert_eq!(
+        lines.len(),
+        5,
+        "Factory should write session_start + 4 message lines"
+    );
+    for (i, line) in lines.iter().enumerate() {
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(line) {
+            panic!("Factory line {i} not valid JSON: {e}\nContent: {line}");
+        }
+    }
+}
+
+#[test]
+fn writer_factory_message_structure() {
+    let _lock = FACTORY_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("FACTORY_HOME", tmp.path());
+
+    let written = Factory
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let lines: Vec<serde_json::Value> = content
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+
+    // Lines after header should be type: "message" with nested message object.
+    for (i, entry) in lines.iter().skip(1).enumerate() {
+        assert_eq!(
+            entry["type"],
+            "message",
+            "Factory line {}: type should be 'message'",
+            i + 1
+        );
+        assert!(
+            entry["message"].is_object(),
+            "Factory line {}: should have nested message object",
+            i + 1
+        );
+        assert!(
+            entry["message"]["role"].is_string(),
+            "Factory line {}: message should have role",
+            i + 1
+        );
+        assert!(
+            entry["message"]["content"].is_string(),
+            "Factory line {}: message should have content",
+            i + 1
+        );
+    }
+}
+
+// ===========================================================================
+// OpenClaw writer tests
+// ===========================================================================
+
+#[test]
+fn writer_openclaw_roundtrip() {
+    let _lock = OPENCLAW_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("OPENCLAW_HOME", tmp.path());
+
+    let session = simple_session();
+    let written = OpenClaw
+        .write_session(&session, &WriteOptions { force: false })
+        .expect("OpenClaw write_session should succeed");
+
+    assert_eq!(
+        written.paths.len(),
+        1,
+        "OpenClaw should produce exactly one file"
+    );
+    assert!(
+        written.paths[0].exists(),
+        "OpenClaw output file should exist"
+    );
+    assert!(
+        written.resume_command.contains("openclaw"),
+        "OpenClaw resume command should reference openclaw"
+    );
+
+    let readback = OpenClaw
+        .read_session(&written.paths[0])
+        .expect("OpenClaw read_session should parse written output");
+
+    assert_eq!(
+        readback.messages.len(),
+        session.messages.len(),
+        "OpenClaw roundtrip: message count"
+    );
+    for (i, (orig, rb)) in session
+        .messages
+        .iter()
+        .zip(readback.messages.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            orig.role, rb.role,
+            "OpenClaw roundtrip msg {i}: role mismatch"
+        );
+        assert_eq!(
+            orig.content, rb.content,
+            "OpenClaw roundtrip msg {i}: content mismatch"
+        );
+    }
+    assert_eq!(
+        readback.workspace, session.workspace,
+        "OpenClaw roundtrip: workspace"
+    );
+}
+
+#[test]
+fn writer_openclaw_session_header() {
+    let _lock = OPENCLAW_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("OPENCLAW_HOME", tmp.path());
+
+    let written = OpenClaw
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let first_line: serde_json::Value =
+        serde_json::from_str(content.lines().next().unwrap()).unwrap();
+
+    assert_eq!(
+        first_line["type"], "session",
+        "OpenClaw first line should be type 'session'"
+    );
+    assert!(
+        first_line["id"].is_string(),
+        "OpenClaw session header should have id"
+    );
+    assert!(
+        first_line["timestamp"].is_string(),
+        "OpenClaw session header should have timestamp"
+    );
+    assert!(
+        first_line["version"].is_string(),
+        "OpenClaw session header should have version"
+    );
+}
+
+#[test]
+fn writer_openclaw_output_valid_jsonl() {
+    let _lock = OPENCLAW_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("OPENCLAW_HOME", tmp.path());
+
+    let written = OpenClaw
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    // session header + 4 messages.
+    assert_eq!(
+        lines.len(),
+        5,
+        "OpenClaw should write session header + 4 message lines"
+    );
+    for (i, line) in lines.iter().enumerate() {
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(line) {
+            panic!("OpenClaw line {i} not valid JSON: {e}\nContent: {line}");
+        }
+    }
+}
+
+#[test]
+fn writer_openclaw_message_ids_are_sequential() {
+    let _lock = OPENCLAW_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("OPENCLAW_HOME", tmp.path());
+
+    let written = OpenClaw
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let lines: Vec<serde_json::Value> = content
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+
+    // Skip header, check message IDs are m1, m2, m3, m4.
+    for (i, entry) in lines.iter().skip(1).enumerate() {
+        let expected_id = format!("m{}", i + 1);
+        assert_eq!(
+            entry["id"].as_str().unwrap(),
+            expected_id,
+            "OpenClaw message {i} should have id '{expected_id}'"
+        );
+    }
+}
+
+#[test]
+fn writer_openclaw_tool_calls_in_content() {
+    let _lock = OPENCLAW_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("OPENCLAW_HOME", tmp.path());
+
+    let written = OpenClaw
+        .write_session(&tool_call_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let lines: Vec<serde_json::Value> = content
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+
+    // Second message (index 1 after header → line 2) is assistant with tool call.
+    let assistant = &lines[2];
+    let msg_content = &assistant["message"]["content"];
+
+    // Content should be array when tool calls exist.
+    if let Some(arr) = msg_content.as_array() {
+        let has_tool = arr.iter().any(|b| b["type"] == "toolCall");
+        assert!(
+            has_tool,
+            "OpenClaw assistant with tool calls should have toolCall block"
+        );
+    }
+}
+
+// ===========================================================================
+// Pi-Agent writer tests
+// ===========================================================================
+
+#[test]
+fn writer_piagent_roundtrip() {
+    let _lock = PI_AGENT_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("PI_AGENT_HOME", tmp.path());
+
+    let session = simple_session();
+    let written = PiAgent
+        .write_session(&session, &WriteOptions { force: false })
+        .expect("PiAgent write_session should succeed");
+
+    assert_eq!(
+        written.paths.len(),
+        1,
+        "PiAgent should produce exactly one file"
+    );
+    assert!(
+        written.paths[0].exists(),
+        "PiAgent output file should exist"
+    );
+    assert!(
+        written.resume_command.contains("pi-agent"),
+        "PiAgent resume command should reference pi-agent"
+    );
+
+    let readback = PiAgent
+        .read_session(&written.paths[0])
+        .expect("PiAgent read_session should parse written output");
+
+    assert_eq!(
+        readback.messages.len(),
+        session.messages.len(),
+        "PiAgent roundtrip: message count"
+    );
+    for (i, (orig, rb)) in session
+        .messages
+        .iter()
+        .zip(readback.messages.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            orig.role, rb.role,
+            "PiAgent roundtrip msg {i}: role mismatch"
+        );
+        assert_eq!(
+            orig.content, rb.content,
+            "PiAgent roundtrip msg {i}: content mismatch"
+        );
+    }
+    assert_eq!(
+        readback.workspace, session.workspace,
+        "PiAgent roundtrip: workspace"
+    );
+}
+
+#[test]
+fn writer_piagent_session_header() {
+    let _lock = PI_AGENT_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("PI_AGENT_HOME", tmp.path());
+
+    let written = PiAgent
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let first_line: serde_json::Value =
+        serde_json::from_str(content.lines().next().unwrap()).unwrap();
+
+    assert_eq!(
+        first_line["type"], "session",
+        "PiAgent first line should be type 'session'"
+    );
+    assert!(
+        first_line["id"].is_string(),
+        "PiAgent session header should have id"
+    );
+    assert!(
+        first_line["timestamp"].is_string(),
+        "PiAgent session header should have timestamp"
+    );
+}
+
+#[test]
+fn writer_piagent_filename_has_underscore() {
+    let _lock = PI_AGENT_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("PI_AGENT_HOME", tmp.path());
+
+    let written = PiAgent
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let filename = written.paths[0].file_name().unwrap().to_str().unwrap();
+    assert!(
+        filename.contains('_'),
+        "PiAgent filename should contain underscore for discovery, got '{filename}'"
+    );
+    assert!(
+        filename.ends_with(".jsonl"),
+        "PiAgent filename should end with .jsonl"
+    );
+}
+
+#[test]
+fn writer_piagent_output_valid_jsonl() {
+    let _lock = PI_AGENT_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("PI_AGENT_HOME", tmp.path());
+
+    let written = PiAgent
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    // session header + 4 messages.
+    assert_eq!(
+        lines.len(),
+        5,
+        "PiAgent should write session header + 4 message lines"
+    );
+    for (i, line) in lines.iter().enumerate() {
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(line) {
+            panic!("PiAgent line {i} not valid JSON: {e}\nContent: {line}");
+        }
+    }
+}
+
+#[test]
+fn writer_piagent_tool_role_normalized() {
+    let _lock = PI_AGENT_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("PI_AGENT_HOME", tmp.path());
+
+    let mut session = simple_session();
+    // Replace a message with Tool role.
+    session.messages[2] = CanonicalMessage {
+        idx: 2,
+        role: MessageRole::Tool,
+        content: "File contents here".to_string(),
+        timestamp: Some(1_700_000_007_000),
+        author: None,
+        tool_calls: vec![],
+        tool_results: vec![],
+        extra: serde_json::Value::Null,
+    };
+
+    let written = PiAgent
+        .write_session(&session, &WriteOptions { force: false })
+        .unwrap();
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let lines: Vec<serde_json::Value> = content
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+
+    // The Tool role message (line 3, index 2 after header) should be written as toolResult.
+    let tool_line = &lines[3]; // header + user + assistant + tool
+    let role = tool_line["message"]["role"].as_str().unwrap_or("");
+    assert_eq!(
+        role, "toolResult",
+        "PiAgent should normalize Tool role to 'toolResult'"
     );
 }

@@ -69,12 +69,18 @@ claude --resume <new-session-id>
 |---|---|---|---|---|
 | Claude Code | `cc` | Yes | Yes | `claude --resume <session-id>` |
 | Codex | `cod` | Yes | Yes | `codex resume <session-id>` |
-| Gemini CLI | `gmi` | Yes | Yes | `gemini resume <session-id>` |
-| Cursor | `cur` | Yes | Yes | Provider-specific |
-| Cline | `cln` | Yes | Yes | Provider-specific |
-| Aider | `aid` | Yes | Yes | Provider-specific |
-| Amp | `amp` | Yes | Yes | Provider-specific |
-| OpenCode | `opc` | Yes | Yes | Provider-specific |
+| Gemini CLI | `gmi` | Yes | Yes | `gemini --resume <session-id>` |
+| Cursor | `cur` | Yes | Yes | `cursor .` |
+| Cline | `cln` | Yes | Yes | `code .` |
+| Aider | `aid` | Yes | Yes | `aider --restore-chat-history` |
+| Amp | `amp` | Yes | Yes | `amp threads continue --execute "Continue from @<session-id>"` |
+| OpenCode | `opc` | Yes | Yes | `opencode` |
+| ChatGPT | `gpt` | Yes | Yes | `open "https://chatgpt.com/c/<session-id>"` |
+| ClawdBot | `cwb` | Yes | Yes | `clawdbot --resume <session-id>` |
+| Vibe | `vib` | Yes | Yes | `vibe --resume <session-id>` |
+| Factory | `fac` | Yes | Yes | `factory --resume <session-id>` |
+| OpenClaw | `ocl` | Yes | Yes | `openclaw --resume <session-id>` |
+| Pi-Agent | `pi` | Yes | Yes | `pi-agent --resume <session-id>` |
 
 Notes:
 - Initial core focus is Claude Code, Codex, and Gemini CLI.
@@ -131,7 +137,7 @@ casr <target-alias> resume <session-id>
 # Examples
 claude --resume <new-session-id>
 codex resume <new-session-id>
-gemini resume <new-session-id>
+gemini --resume <new-session-id>
 ```
 
 ## Commands
