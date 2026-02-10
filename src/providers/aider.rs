@@ -260,18 +260,23 @@ impl Aider {
                 flush_user(&mut user_lines, &mut messages);
 
                 let stripped = rest.trim_end().trim_end_matches("  ");
-                tool_lines.push(stripped.to_string());
+                let parsed_model = extract_model_from_tool_line(stripped);
+                let parsed_workspace = extract_workspace_from_tool_line(stripped);
+                let is_metadata_only_line = parsed_model.is_some() || parsed_workspace.is_some();
 
                 // Extract metadata from tool output lines.
                 if model_name.is_none()
-                    && let Some(model) = extract_model_from_tool_line(stripped)
+                    && let Some(model) = parsed_model
                 {
                     model_name = Some(model);
                 }
                 if workspace.is_none()
-                    && let Some(ws) = extract_workspace_from_tool_line(stripped)
+                    && let Some(ws) = parsed_workspace
                 {
                     workspace = Some(ws);
+                }
+                if !is_metadata_only_line {
+                    tool_lines.push(stripped.to_string());
                 }
 
                 continue;
@@ -531,7 +536,8 @@ impl Provider for Aider {
 
         let content_bytes = output.into_bytes();
 
-        let outcome = crate::pipeline::atomic_write(&target_path, &content_bytes, opts.force)?;
+        let outcome =
+            crate::pipeline::atomic_write(&target_path, &content_bytes, opts.force, self.slug())?;
 
         info!(
             target_session_id,

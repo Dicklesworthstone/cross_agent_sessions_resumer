@@ -1,18 +1,21 @@
-//! Writer integration tests for all three providers.
+//! Writer integration tests for multiple providers.
 //!
 //! Tests `write_session()` → `read_session()` round-trip compatibility and
 //! provider-specific output shape conformance.
 //!
 //! Each provider's tests are serialized via a per-provider Mutex because
 //! `write_session()` reads environment variables (`CLAUDE_HOME`, `CODEX_HOME`,
-//! `GEMINI_HOME`) to determine the target directory. Using separate mutexes
-//! allows cross-provider parallelism while preventing intra-provider races.
+//! `GEMINI_HOME`, `CLINE_HOME`, `AMP_HOME`) to determine the target directory.
+//! Using separate mutexes allows cross-provider parallelism while preventing
+//! intra-provider races.
 
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
 use casr::model::{CanonicalMessage, CanonicalSession, MessageRole, ToolCall};
+use casr::providers::amp::Amp;
 use casr::providers::claude_code::ClaudeCode;
+use casr::providers::cline::Cline;
 use casr::providers::codex::Codex;
 use casr::providers::gemini::Gemini;
 use casr::providers::{Provider, WriteOptions};
@@ -24,6 +27,8 @@ use casr::providers::{Provider, WriteOptions};
 static CC_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static CODEX_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static GEMINI_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static CLINE_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static AMP_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// RAII guard that sets an env var and restores the original value on drop.
 struct EnvGuard {
@@ -980,5 +985,161 @@ fn writer_codex_default_workspace_uses_tmp() {
     assert_eq!(
         first["payload"]["cwd"], "/tmp",
         "Codex should fall back to /tmp when workspace is None"
+    );
+}
+
+// ===========================================================================
+// Cline writer tests
+// ===========================================================================
+
+#[test]
+fn writer_cline_roundtrip() {
+    let _lock = CLINE_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CLINE_HOME", tmp.path());
+
+    let session = simple_session();
+    let written = Cline
+        .write_session(&session, &WriteOptions { force: false })
+        .expect("Cline write_session should succeed");
+
+    assert_eq!(written.paths.len(), 3, "Cline should write 3 task files");
+    assert!(
+        written.session_id.chars().all(|c| c.is_ascii_digit()),
+        "Cline task ids should be numeric"
+    );
+    assert_eq!(written.resume_command, "code .");
+
+    // The shared task history state file should include the new task id.
+    let history_path = tmp.path().join("state/taskHistory.json");
+    assert!(
+        history_path.is_file(),
+        "Cline should write taskHistory.json"
+    );
+    let history_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&history_path).unwrap()).unwrap();
+    let items = history_json
+        .as_array()
+        .expect("taskHistory.json should be an array");
+    assert!(
+        items
+            .iter()
+            .any(|v| v.get("id").and_then(|x| x.as_str()) == Some(&written.session_id)),
+        "taskHistory.json should include the written task id"
+    );
+
+    let readback = Cline
+        .read_session(&written.paths[0])
+        .expect("Cline read_session should parse written output");
+
+    assert_eq!(
+        readback.messages.len(),
+        session.messages.len(),
+        "Cline roundtrip: message count"
+    );
+    for (i, (orig, rb)) in session
+        .messages
+        .iter()
+        .zip(readback.messages.iter())
+        .enumerate()
+    {
+        assert_eq!(orig.role, rb.role, "Cline roundtrip msg {i}: role mismatch");
+        assert_eq!(
+            orig.content, rb.content,
+            "Cline roundtrip msg {i}: content mismatch"
+        );
+    }
+    assert_eq!(
+        readback.workspace, session.workspace,
+        "Cline roundtrip: workspace"
+    );
+    assert_eq!(
+        readback.model_name, session.model_name,
+        "Cline roundtrip: model_name should survive via taskHistory.json"
+    );
+}
+
+// ===========================================================================
+// Amp writer tests
+// ===========================================================================
+
+#[test]
+fn writer_amp_roundtrip() {
+    let _lock = AMP_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("AMP_HOME", tmp.path());
+
+    let session = simple_session();
+    let written = Amp
+        .write_session(&session, &WriteOptions { force: false })
+        .expect("Amp write_session should succeed");
+
+    assert_eq!(written.paths.len(), 1, "Amp should write one thread file");
+    assert!(
+        written.session_id.starts_with("T-"),
+        "Amp session IDs should start with 'T-'"
+    );
+    assert!(
+        written.paths[0].starts_with(tmp.path().join("threads")),
+        "Amp thread should be written under $AMP_HOME/threads"
+    );
+    assert!(
+        written.resume_command.contains(&written.session_id),
+        "Amp resume command should reference written session ID"
+    );
+
+    let readback = Amp
+        .read_session(&written.paths[0])
+        .expect("Amp read_session should parse written output");
+
+    assert_eq!(
+        readback.messages.len(),
+        session.messages.len(),
+        "Amp roundtrip: message count"
+    );
+    for (i, (orig, rb)) in session
+        .messages
+        .iter()
+        .zip(readback.messages.iter())
+        .enumerate()
+    {
+        assert_eq!(orig.role, rb.role, "Amp roundtrip msg {i}: role mismatch");
+        assert_eq!(
+            orig.content, rb.content,
+            "Amp roundtrip msg {i}: content mismatch"
+        );
+    }
+    assert_eq!(
+        readback.workspace, session.workspace,
+        "Amp roundtrip: workspace"
+    );
+}
+
+#[test]
+fn writer_amp_output_has_expected_shape() {
+    let _lock = AMP_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("AMP_HOME", tmp.path());
+
+    let written = Amp
+        .write_session(&simple_session(), &WriteOptions { force: false })
+        .expect("Amp write_session should succeed");
+
+    let content = std::fs::read_to_string(&written.paths[0]).unwrap();
+    let root: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    assert!(root["id"].is_string(), "Amp thread should have string id");
+    assert!(
+        root["created"].is_i64(),
+        "Amp thread should have numeric created"
+    );
+    assert!(
+        root["messages"].is_array(),
+        "Amp thread should have messages array"
+    );
+    assert_eq!(
+        root["messages"].as_array().unwrap().len(),
+        4,
+        "Amp thread should contain one entry per message"
     );
 }

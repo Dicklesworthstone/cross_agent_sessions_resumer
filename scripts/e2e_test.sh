@@ -48,6 +48,10 @@ export CLAUDE_HOME="$TMPDIR_ROOT/claude"
 export CODEX_HOME="$TMPDIR_ROOT/codex"
 export GEMINI_HOME="$TMPDIR_ROOT/gemini"
 export CURSOR_HOME="$TMPDIR_ROOT/cursor"
+export CLINE_HOME="$TMPDIR_ROOT/cline"
+export AIDER_HOME="$TMPDIR_ROOT/aider"
+export AMP_HOME="$TMPDIR_ROOT/amp"
+export OPENCODE_HOME="$TMPDIR_ROOT/opencode"
 export NO_COLOR=1
 
 # ---------------------------------------------------------------------------
@@ -205,7 +209,8 @@ setup_gemini_fixture() {
 }
 
 reset_env() {
-    rm -rf "$CLAUDE_HOME" "$CODEX_HOME" "$GEMINI_HOME" "$CURSOR_HOME"
+    rm -rf "$CLAUDE_HOME" "$CODEX_HOME" "$GEMINI_HOME" "$CURSOR_HOME" \
+        "$CLINE_HOME" "$AIDER_HOME" "$AMP_HOME" "$OPENCODE_HOME"
 }
 
 # ---------------------------------------------------------------------------
@@ -260,6 +265,10 @@ assert_stdout_contains "providers lists Claude Code" "Claude Code"
 assert_stdout_contains "providers lists Codex" "Codex"
 assert_stdout_contains "providers lists Gemini" "Gemini"
 assert_stdout_contains "providers lists Cursor" "Cursor"
+assert_stdout_contains "providers lists Cline" "Cline"
+assert_stdout_contains "providers lists Aider" "Aider"
+assert_stdout_contains "providers lists Amp" "Amp"
+assert_stdout_contains "providers lists OpenCode" "OpenCode"
 
 log "TEST: Providers --json"
 run_casr "providers json" --json providers
@@ -408,6 +417,99 @@ log "TEST: Resume Cursor → CC"
 run_casr "resume cur->cc" resume cc "$cursor_sid" --source cur
 assert_exit_ok "Cursor→CC write succeeds"
 assert_stdout_contains "cursor→cc shows claude-code" "claude-code"
+
+# ===========================================================================
+# TEST: Resume — CC → Cline
+# ===========================================================================
+
+log "TEST: Resume CC → Cline"
+reset_env
+cc_sid=$(setup_cc_fixture "cc_simple")
+run_casr "resume cc->cln" --json resume cln "$cc_sid"
+assert_exit_ok "CC→Cline write succeeds"
+assert_valid_json "CC→Cline JSON is valid"
+cline_sid=$(echo "$LAST_STDOUT" | jq -r '.target_session_id // empty')
+if [[ -n "$cline_sid" ]]; then
+    pass "CC→Cline JSON includes target_session_id"
+else
+    fail "CC→Cline JSON includes target_session_id" "non-empty id" "<empty>"
+fi
+assert_file_exists "Cline API history exists after conversion" \
+    "$CLINE_HOME/tasks/$cline_sid/api_conversation_history.json"
+
+log "TEST: Resume Cline → CC"
+run_casr "resume cln->cc" resume cc "$cline_sid" --source cln
+assert_exit_ok "Cline→CC write succeeds"
+assert_stdout_contains "cline→cc shows claude-code" "claude-code"
+
+# ===========================================================================
+# TEST: Resume — CC → Amp
+# ===========================================================================
+
+log "TEST: Resume CC → Amp"
+reset_env
+cc_sid=$(setup_cc_fixture "cc_simple")
+run_casr "resume cc->amp" --json resume amp "$cc_sid"
+assert_exit_ok "CC→Amp write succeeds"
+assert_valid_json "CC→Amp JSON is valid"
+amp_sid=$(echo "$LAST_STDOUT" | jq -r '.target_session_id // empty')
+if [[ -n "$amp_sid" ]]; then
+    pass "CC→Amp JSON includes target_session_id"
+else
+    fail "CC→Amp JSON includes target_session_id" "non-empty id" "<empty>"
+fi
+assert_file_exists "Amp thread file exists after conversion" "$AMP_HOME/threads/${amp_sid}.json"
+
+log "TEST: Resume Amp → CC"
+run_casr "resume amp->cc" resume cc "$amp_sid" --source amp
+assert_exit_ok "Amp→CC write succeeds"
+assert_stdout_contains "amp→cc shows claude-code" "claude-code"
+
+# ===========================================================================
+# TEST: Resume — CC → Aider
+# ===========================================================================
+
+log "TEST: Resume CC → Aider"
+reset_env
+cc_sid=$(setup_cc_fixture "cc_simple")
+run_casr "resume cc->aid" --json resume aid "$cc_sid"
+assert_exit_ok "CC→Aider write succeeds"
+assert_valid_json "CC→Aider JSON is valid"
+aid_sid=$(echo "$LAST_STDOUT" | jq -r '.target_session_id // empty')
+if [[ -n "$aid_sid" ]]; then
+    pass "CC→Aider JSON includes target_session_id"
+else
+    fail "CC→Aider JSON includes target_session_id" "non-empty id" "<empty>"
+fi
+assert_file_exists "Aider history file exists after conversion" "$AIDER_HOME/.aider.chat.history.md"
+
+log "TEST: Resume Aider → CC"
+run_casr "resume aid->cc" resume cc "$aid_sid" --source aid
+assert_exit_ok "Aider→CC write succeeds"
+assert_stdout_contains "aider→cc shows claude-code" "claude-code"
+
+# ===========================================================================
+# TEST: Resume — CC → OpenCode
+# ===========================================================================
+
+log "TEST: Resume CC → OpenCode"
+reset_env
+cc_sid=$(setup_cc_fixture "cc_simple")
+run_casr "resume cc->opc" --json resume opc "$cc_sid"
+assert_exit_ok "CC→OpenCode write succeeds"
+assert_valid_json "CC→OpenCode JSON is valid"
+opc_sid=$(echo "$LAST_STDOUT" | jq -r '.target_session_id // empty')
+if [[ -n "$opc_sid" ]]; then
+    pass "CC→OpenCode JSON includes target_session_id"
+else
+    fail "CC→OpenCode JSON includes target_session_id" "non-empty id" "<empty>"
+fi
+assert_file_exists "OpenCode DB exists after conversion" "$OPENCODE_HOME/opencode.db"
+
+log "TEST: Resume OpenCode → CC"
+run_casr "resume opc->cc" resume cc "$opc_sid" --source opc
+assert_exit_ok "OpenCode→CC write succeeds"
+assert_stdout_contains "opencode→cc shows claude-code" "claude-code"
 
 # ===========================================================================
 # TEST: Resume — Codex → CC

@@ -599,6 +599,7 @@ pub fn atomic_write(
     target_path: &Path,
     content: &[u8],
     force: bool,
+    provider_slug: &str,
 ) -> Result<AtomicWriteOutcome, CasrError> {
     use std::io::Write;
 
@@ -606,7 +607,7 @@ pub fn atomic_write(
     if let Some(parent) = target_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| CasrError::SessionWriteError {
             path: target_path.to_path_buf(),
-            provider: String::new(),
+            provider: provider_slug.to_string(),
             detail: format!("failed to create parent directories: {e}"),
         })?;
     }
@@ -630,13 +631,13 @@ pub fn atomic_write(
         maybe_inject_atomic_write_failure(AtomicWriteFailStage::BackupRename).map_err(|e| {
             CasrError::SessionWriteError {
                 path: target_path.to_path_buf(),
-                provider: String::new(),
+                provider: provider_slug.to_string(),
                 detail: format!("failed to create backup: {e}"),
             }
         })?;
         std::fs::rename(target_path, &bak).map_err(|e| CasrError::SessionWriteError {
             path: target_path.to_path_buf(),
-            provider: String::new(),
+            provider: provider_slug.to_string(),
             detail: format!("failed to create backup: {e}"),
         })?;
         Some(bak)
@@ -681,7 +682,7 @@ pub fn atomic_write(
         }
         return Err(CasrError::SessionWriteError {
             path: target_path.to_path_buf(),
-            provider: String::new(),
+            provider: provider_slug.to_string(),
             detail: format!("failed to write temp file: {e}"),
         });
     }
@@ -700,7 +701,7 @@ pub fn atomic_write(
         }
         return Err(CasrError::SessionWriteError {
             path: target_path.to_path_buf(),
-            provider: String::new(),
+            provider: provider_slug.to_string(),
             detail: format!("failed to rename temp file to target: {e}"),
         });
     }
@@ -717,7 +718,7 @@ pub fn atomic_write(
         }
         return Err(CasrError::SessionWriteError {
             path: target_path.to_path_buf(),
-            provider: String::new(),
+            provider: provider_slug.to_string(),
             detail: format!("failed to rename temp file to target: {e}"),
         });
     }
@@ -734,7 +735,7 @@ pub fn atomic_write(
 /// Restore a backup after a verification failure.
 ///
 /// Removes the broken target and renames the backup back into place.
-pub fn restore_backup(outcome: &AtomicWriteOutcome) -> Result<(), CasrError> {
+pub fn restore_backup(outcome: &AtomicWriteOutcome, provider_slug: &str) -> Result<(), CasrError> {
     if let Some(ref bak) = outcome.backup_path {
         warn!(
             backup = %bak.display(),
@@ -744,7 +745,7 @@ pub fn restore_backup(outcome: &AtomicWriteOutcome) -> Result<(), CasrError> {
         let _ = std::fs::remove_file(&outcome.target_path);
         std::fs::rename(bak, &outcome.target_path).map_err(|e| CasrError::SessionWriteError {
             path: outcome.target_path.clone(),
-            provider: String::new(),
+            provider: provider_slug.to_string(),
             detail: format!("failed to restore backup: {e}"),
         })?;
     } else {
@@ -936,7 +937,8 @@ mod tests {
         let target = tmp.path().join("session.jsonl");
         fs::write(&target, "existing").expect("seed target");
 
-        let err = atomic_write(&target, b"new content", false).expect_err("should conflict");
+        let err =
+            atomic_write(&target, b"new content", false, "test").expect_err("should conflict");
         assert!(matches!(err, CasrError::SessionConflict { .. }));
         assert_eq!(
             fs::read_to_string(&target).expect("target should remain"),
@@ -958,7 +960,8 @@ mod tests {
             fs::write(&target, "original").expect("seed target");
 
             let _reset = with_fail_stage(stage);
-            let err = atomic_write(&target, b"new content", true).expect_err("expected failure");
+            let err =
+                atomic_write(&target, b"new content", true, "test").expect_err("expected failure");
             assert!(
                 matches!(err, CasrError::SessionWriteError { .. }),
                 "expected SessionWriteError for stage {stage:?}, got {err:?}"
@@ -988,7 +991,8 @@ mod tests {
         fs::write(&target, "original").expect("seed target");
 
         let _reset = with_fail_stage(AtomicWriteFailStage::BackupRename);
-        let err = atomic_write(&target, b"new content", true).expect_err("expected failure");
+        let err =
+            atomic_write(&target, b"new content", true, "test").expect_err("expected failure");
         let CasrError::SessionWriteError { detail, .. } = err else {
             panic!("expected SessionWriteError, got {err:?}");
         };
@@ -1011,8 +1015,8 @@ mod tests {
         let target = tmp.path().join("session.jsonl");
         fs::write(&target, "original").expect("seed target");
 
-        let outcome =
-            atomic_write(&target, b"new content", true).expect("force write should succeed");
+        let outcome = atomic_write(&target, b"new content", true, "test")
+            .expect("force write should succeed");
         assert_eq!(
             fs::read_to_string(&target).expect("target should contain new content"),
             "new content"
@@ -1028,7 +1032,7 @@ mod tests {
             "original"
         );
 
-        restore_backup(&outcome).expect("restore should succeed");
+        restore_backup(&outcome, "test").expect("restore should succeed");
         assert_eq!(
             fs::read_to_string(&target).expect("target should be restored"),
             "original"
@@ -1041,12 +1045,12 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let target = tmp.path().join("session.jsonl");
 
-        let outcome =
-            atomic_write(&target, b"fresh content", false).expect("initial write should succeed");
+        let outcome = atomic_write(&target, b"fresh content", false, "test")
+            .expect("initial write should succeed");
         assert!(target.exists(), "target should exist after write");
         assert!(outcome.backup_path.is_none(), "no backup expected");
 
-        restore_backup(&outcome).expect("restore should succeed without backup");
+        restore_backup(&outcome, "test").expect("restore should succeed without backup");
         assert!(
             !target.exists(),
             "target should be removed when no backup is available"

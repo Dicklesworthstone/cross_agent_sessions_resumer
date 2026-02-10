@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 
 use casr::model::{CanonicalSession, MessageRole};
 use casr::providers::Provider;
+use casr::providers::aider::Aider;
+use casr::providers::amp::Amp;
 use casr::providers::claude_code::ClaudeCode;
+use casr::providers::cline::Cline;
 use casr::providers::codex::Codex;
 use casr::providers::gemini::Gemini;
 
@@ -348,6 +351,46 @@ fn fixture_gmi_gemini_role() {
         .expect("gmi_gemini_role should parse");
     let expected = load_expected("gmi_gemini_role");
     assert_session_matches(&session, &expected, "gmi_gemini_role");
+}
+
+// ---------------------------------------------------------------------------
+// Cline fixtures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixture_cline_simple() {
+    let path = fixtures_dir().join("cline/tasks/1700001234567/api_conversation_history.json");
+    let session = Cline
+        .read_session(&path)
+        .expect("cline_simple should parse");
+    let expected = load_expected("cline_simple");
+    assert_session_matches(&session, &expected, "cline_simple");
+}
+
+// ---------------------------------------------------------------------------
+// Amp fixtures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixture_amp_simple() {
+    let path = fixtures_dir().join("amp/T-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.json");
+    let session = Amp.read_session(&path).expect("amp_simple should parse");
+    let expected = load_expected("amp_simple");
+    assert_session_matches(&session, &expected, "amp_simple");
+}
+
+// ---------------------------------------------------------------------------
+// Aider fixtures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixture_aider_simple() {
+    let path = fixtures_dir().join("aider/aider_simple.md");
+    let session = Aider
+        .read_session(&path)
+        .expect("aider_simple should parse");
+    let expected = load_expected("aider_simple");
+    assert_session_matches(&session, &expected, "aider_simple");
 }
 
 // ---------------------------------------------------------------------------

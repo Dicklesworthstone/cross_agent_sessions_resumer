@@ -372,7 +372,8 @@ impl Provider for Gemini {
 
         let content_bytes = serde_json::to_string_pretty(&root)?.into_bytes();
 
-        let outcome = crate::pipeline::atomic_write(&target_path, &content_bytes, opts.force)?;
+        let outcome =
+            crate::pipeline::atomic_write(&target_path, &content_bytes, opts.force, self.slug())?;
 
         info!(
             target_session_id,

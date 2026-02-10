@@ -1,10 +1,13 @@
 //! Provider trait and concrete provider implementations.
 //!
-//! Each AI coding agent (Claude Code, Codex, Gemini CLI, Cursor) implements the
-//! [`Provider`] trait to read/write sessions in its native format.
+//! Each supported provider (Claude Code, Codex, Gemini CLI, Cursor, Cline,
+//! Aider, Amp, OpenCode) implements the [`Provider`] trait to read/write
+//! sessions in its native format.
 
 pub mod aider;
+pub mod amp;
 pub mod claude_code;
+pub mod cline;
 pub mod codex;
 pub mod cursor;
 pub mod gemini;

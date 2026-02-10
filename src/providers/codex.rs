@@ -252,7 +252,8 @@ impl Provider for Codex {
 
         let content_bytes = lines.join("\n").into_bytes();
 
-        let outcome = crate::pipeline::atomic_write(&target_path, &content_bytes, opts.force)?;
+        let outcome =
+            crate::pipeline::atomic_write(&target_path, &content_bytes, opts.force, self.slug())?;
 
         info!(
             target_session_id,

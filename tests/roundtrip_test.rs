@@ -1,4 +1,4 @@
-//! Round-trip fidelity tests for the core 6 conversion paths plus Cursor paths.
+//! Round-trip fidelity tests for core conversion paths plus extended provider paths.
 //!
 //! Each test: read source fixture → canonical → write to target (temp dir) →
 //! read back → compare canonical fields against original.
@@ -24,7 +24,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
 use casr::model::{CanonicalSession, MessageRole};
+use casr::providers::aider::Aider;
+use casr::providers::amp::Amp;
 use casr::providers::claude_code::ClaudeCode;
+use casr::providers::cline::Cline;
 use casr::providers::codex::Codex;
 use casr::providers::cursor::Cursor;
 use casr::providers::gemini::Gemini;
@@ -39,6 +42,9 @@ static CC_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static CODEX_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static GEMINI_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static CURSOR_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static CLINE_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static AIDER_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static AMP_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static OPENCODE_ENV: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 struct EnvGuard {
@@ -330,6 +336,165 @@ fn roundtrip_opencode_to_cc() {
 
     assert_roundtrip_fidelity(&opencode_canonical, &readback_cc, "Opc→CC");
     assert_new_session_id(&readback_cc, "Opc→CC");
+}
+
+// ===========================================================================
+// Additional provider paths: Cline and Amp
+// ===========================================================================
+
+#[test]
+fn roundtrip_cc_to_cline() {
+    let _lock = CLINE_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("CLINE_HOME", tmp.path());
+
+    let original = read_cc_fixture("cc_simple");
+    let written = Cline
+        .write_session(&original, &WriteOptions { force: false })
+        .expect("CC→Cln: write should succeed");
+
+    let readback = Cline
+        .read_session(&written.paths[0])
+        .expect("CC→Cln: read-back should succeed");
+
+    assert_roundtrip_fidelity(&original, &readback, "CC→Cln");
+    assert_new_session_id(&readback, "CC→Cln");
+}
+
+#[test]
+fn roundtrip_cline_to_cc() {
+    let cline_canonical = {
+        let _cline_lock = CLINE_ENV.lock().unwrap();
+        let cline_tmp = tempfile::TempDir::new().unwrap();
+        let _cline_env = EnvGuard::set("CLINE_HOME", cline_tmp.path());
+
+        let seed = read_cc_fixture("cc_simple");
+        let written_cline = Cline
+            .write_session(&seed, &WriteOptions { force: false })
+            .expect("seed CC→Cln write should succeed");
+
+        Cline
+            .read_session(&written_cline.paths[0])
+            .expect("seed Cln read-back should succeed")
+    };
+
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let cc_tmp = tempfile::TempDir::new().unwrap();
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", cc_tmp.path());
+
+    let written_cc = ClaudeCode
+        .write_session(&cline_canonical, &WriteOptions { force: false })
+        .expect("Cln→CC: write should succeed");
+
+    let readback_cc = ClaudeCode
+        .read_session(&written_cc.paths[0])
+        .expect("Cln→CC: read-back should succeed");
+
+    assert_roundtrip_fidelity(&cline_canonical, &readback_cc, "Cln→CC");
+    assert_new_session_id(&readback_cc, "Cln→CC");
+}
+
+#[test]
+fn roundtrip_cc_to_amp() {
+    let _lock = AMP_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("AMP_HOME", tmp.path());
+
+    let original = read_cc_fixture("cc_simple");
+    let written = Amp
+        .write_session(&original, &WriteOptions { force: false })
+        .expect("CC→Amp: write should succeed");
+
+    let readback = Amp
+        .read_session(&written.paths[0])
+        .expect("CC→Amp: read-back should succeed");
+
+    assert_roundtrip_fidelity(&original, &readback, "CC→Amp");
+    assert_new_session_id(&readback, "CC→Amp");
+}
+
+#[test]
+fn roundtrip_amp_to_cc() {
+    let amp_canonical = {
+        let _amp_lock = AMP_ENV.lock().unwrap();
+        let amp_tmp = tempfile::TempDir::new().unwrap();
+        let _amp_env = EnvGuard::set("AMP_HOME", amp_tmp.path());
+
+        let seed = read_cc_fixture("cc_simple");
+        let written_amp = Amp
+            .write_session(&seed, &WriteOptions { force: false })
+            .expect("seed CC→Amp write should succeed");
+
+        Amp.read_session(&written_amp.paths[0])
+            .expect("seed Amp read-back should succeed")
+    };
+
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let cc_tmp = tempfile::TempDir::new().unwrap();
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", cc_tmp.path());
+
+    let written_cc = ClaudeCode
+        .write_session(&amp_canonical, &WriteOptions { force: false })
+        .expect("Amp→CC: write should succeed");
+
+    let readback_cc = ClaudeCode
+        .read_session(&written_cc.paths[0])
+        .expect("Amp→CC: read-back should succeed");
+
+    assert_roundtrip_fidelity(&amp_canonical, &readback_cc, "Amp→CC");
+    assert_new_session_id(&readback_cc, "Amp→CC");
+}
+
+#[test]
+fn roundtrip_cc_to_aider() {
+    let _lock = AIDER_ENV.lock().unwrap();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("AIDER_HOME", tmp.path());
+
+    let original = read_cc_fixture("cc_simple");
+    let written = Aider
+        .write_session(&original, &WriteOptions { force: false })
+        .expect("CC→Aid: write should succeed");
+
+    let readback = Aider
+        .read_session(&written.paths[0])
+        .expect("CC→Aid: read-back should succeed");
+
+    assert_roundtrip_fidelity(&original, &readback, "CC→Aid");
+    assert_new_session_id(&readback, "CC→Aid");
+}
+
+#[test]
+fn roundtrip_aider_to_cc() {
+    let aider_canonical = {
+        let _aider_lock = AIDER_ENV.lock().unwrap();
+        let aider_tmp = tempfile::TempDir::new().unwrap();
+        let _aider_env = EnvGuard::set("AIDER_HOME", aider_tmp.path());
+
+        let seed = read_cc_fixture("cc_simple");
+        let written_aider = Aider
+            .write_session(&seed, &WriteOptions { force: false })
+            .expect("seed CC→Aid write should succeed");
+
+        Aider
+            .read_session(&written_aider.paths[0])
+            .expect("seed Aid read-back should succeed")
+    };
+
+    let _cc_lock = CC_ENV.lock().unwrap();
+    let cc_tmp = tempfile::TempDir::new().unwrap();
+    let _cc_env = EnvGuard::set("CLAUDE_HOME", cc_tmp.path());
+
+    let written_cc = ClaudeCode
+        .write_session(&aider_canonical, &WriteOptions { force: false })
+        .expect("Aid→CC: write should succeed");
+
+    let readback_cc = ClaudeCode
+        .read_session(&written_cc.paths[0])
+        .expect("Aid→CC: read-back should succeed");
+
+    assert_roundtrip_fidelity(&aider_canonical, &readback_cc, "Aid→CC");
+    assert_new_session_id(&readback_cc, "Aid→CC");
 }
 
 // ===========================================================================

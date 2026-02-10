@@ -8,7 +8,7 @@ use std::{
 use casr::{
     discovery::{DetectionResult, ProviderRegistry, SourceHint},
     error::CasrError,
-    model::CanonicalSession,
+    model::{CanonicalMessage, CanonicalSession, MessageRole},
     providers::{Provider, WriteOptions, WrittenSession},
 };
 
@@ -20,6 +20,7 @@ struct MockProvider {
     installed: bool,
     roots: Vec<PathBuf>,
     owns: HashMap<String, PathBuf>,
+    can_read_orphan_paths: bool,
 }
 
 impl MockProvider {
@@ -31,11 +32,17 @@ impl MockProvider {
             installed,
             roots,
             owns: HashMap::new(),
+            can_read_orphan_paths: false,
         }
     }
 
     fn with_owned_session(mut self, session_id: &str, path: impl Into<PathBuf>) -> Self {
         self.owns.insert(session_id.to_string(), path.into());
+        self
+    }
+
+    fn with_orphan_path_read_support(mut self) -> Self {
+        self.can_read_orphan_paths = true;
         self
     }
 }
@@ -70,7 +77,43 @@ impl Provider for MockProvider {
     }
 
     fn read_session(&self, _path: &Path) -> anyhow::Result<CanonicalSession> {
-        Err(anyhow::anyhow!("not used in discovery tests"))
+        if !self.can_read_orphan_paths {
+            return Err(anyhow::anyhow!("mock provider cannot read this path"));
+        }
+
+        Ok(CanonicalSession {
+            session_id: "mock-session".to_string(),
+            provider_slug: self.slug.clone(),
+            workspace: None,
+            title: None,
+            started_at: None,
+            ended_at: None,
+            messages: vec![
+                CanonicalMessage {
+                    idx: 0,
+                    role: MessageRole::User,
+                    content: "hi".to_string(),
+                    timestamp: None,
+                    author: None,
+                    tool_calls: Vec::new(),
+                    tool_results: Vec::new(),
+                    extra: serde_json::json!({}),
+                },
+                CanonicalMessage {
+                    idx: 1,
+                    role: MessageRole::Assistant,
+                    content: "hello".to_string(),
+                    timestamp: None,
+                    author: None,
+                    tool_calls: Vec::new(),
+                    tool_results: Vec::new(),
+                    extra: serde_json::json!({}),
+                },
+            ],
+            metadata: serde_json::json!({}),
+            source_path: _path.to_path_buf(),
+            model_name: None,
+        })
     }
 
     fn write_session(
@@ -329,7 +372,7 @@ fn source_path_hint_bypasses_discovery_and_uses_owning_provider() {
 }
 
 #[test]
-fn source_path_hint_without_root_match_uses_first_installed_provider() {
+fn source_path_hint_without_root_match_selects_best_effort_provider() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let orphan_path = tmp.path().join("orphan.json");
     std::fs::write(&orphan_path, "{}").expect("seed orphan file");
@@ -347,13 +390,14 @@ fn source_path_hint_without_root_match_uses_first_installed_provider() {
         "cod",
         true,
         vec![tmp.path().join("cod-root")],
-    );
+    )
+    .with_orphan_path_read_support();
     let registry = ProviderRegistry::new(vec![Box::new(cc), Box::new(cod)]);
 
     let hint = SourceHint::Path(orphan_path.clone());
     let resolved = registry
         .resolve_session("ignored", Some(&hint))
-        .expect("fallback provider should be selected");
-    assert_eq!(resolved.provider.slug(), "claude-code");
+        .expect("best-effort provider should be selected");
+    assert_eq!(resolved.provider.slug(), "codex");
     assert_eq!(resolved.path, orphan_path);
 }

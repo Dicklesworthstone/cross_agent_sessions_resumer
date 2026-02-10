@@ -2,7 +2,8 @@
 //!
 //! Uses `assert_cmd` to invoke the compiled binary and validate output.
 //! All tests use temp directories with env overrides (`CLAUDE_HOME`,
-//! `CODEX_HOME`, `GEMINI_HOME`, `CURSOR_HOME`, `OPENCODE_HOME`) so they never touch real provider data.
+//! `CODEX_HOME`, `GEMINI_HOME`, `CURSOR_HOME`, `CLINE_HOME`, `AIDER_HOME`,
+//! `AMP_HOME`, `OPENCODE_HOME`) so they never touch real provider data.
 
 use std::fs;
 use std::path::PathBuf;
@@ -18,8 +19,8 @@ fn fixtures_dir() -> PathBuf {
 
 /// Build a `Command` for the casr binary with isolated provider homes.
 ///
-/// Sets `CLAUDE_HOME`, `CODEX_HOME`, `GEMINI_HOME`, `CURSOR_HOME`, `OPENCODE_HOME` to subdirs of the
-/// provided temp dir so the CLI never touches real provider data.
+/// Sets provider home overrides to subdirs of the provided temp dir so the
+/// CLI never touches real provider data.
 fn casr_cmd(tmp: &TempDir) -> Command {
     #[allow(deprecated)]
     let mut cmd = Command::cargo_bin("casr").expect("casr binary should be built");
@@ -27,7 +28,12 @@ fn casr_cmd(tmp: &TempDir) -> Command {
         .env("CODEX_HOME", tmp.path().join("codex"))
         .env("GEMINI_HOME", tmp.path().join("gemini"))
         .env("CURSOR_HOME", tmp.path().join("cursor"))
+        .env("CLINE_HOME", tmp.path().join("cline"))
+        .env("AIDER_HOME", tmp.path().join("aider"))
+        .env("AMP_HOME", tmp.path().join("amp"))
         .env("OPENCODE_HOME", tmp.path().join("opencode"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("xdg-config"))
+        .env("XDG_DATA_HOME", tmp.path().join("xdg-data"))
         // Suppress colored output in tests.
         .env("NO_COLOR", "1");
     cmd
@@ -183,6 +189,9 @@ fn cli_providers_succeeds() {
         .stdout(predicate::str::contains("Codex"))
         .stdout(predicate::str::contains("Gemini"))
         .stdout(predicate::str::contains("Cursor"))
+        .stdout(predicate::str::contains("Cline"))
+        .stdout(predicate::str::contains("Aider"))
+        .stdout(predicate::str::contains("Amp"))
         .stdout(predicate::str::contains("OpenCode"));
 }
 
@@ -256,6 +265,60 @@ fn cli_list_limit_respects_bound() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(parsed.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn cli_list_workspace_filter_filters_sessions() {
+    let tmp = TempDir::new().unwrap();
+    let myapp_id = setup_cc_fixture(&tmp, "cc_simple"); // /data/projects/myapp
+    let webapp_id = setup_cc_fixture(&tmp, "cc_complex"); // /data/projects/webapp
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "list", "--workspace", "/data/projects/myapp"])
+        .output()
+        .expect("list should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let sessions = parsed.as_array().expect("list --json should be an array");
+
+    assert!(
+        sessions
+            .iter()
+            .any(|s| s["session_id"].as_str() == Some(&myapp_id)),
+        "expected myapp session to be present"
+    );
+    assert!(
+        !sessions
+            .iter()
+            .any(|s| s["session_id"].as_str() == Some(&webapp_id)),
+        "expected webapp session to be filtered out"
+    );
+}
+
+#[test]
+fn cli_list_sort_messages_orders_descending() {
+    let tmp = TempDir::new().unwrap();
+    let simple_id = setup_cc_fixture(&tmp, "cc_simple");
+    let complex_id = setup_cc_fixture(&tmp, "cc_complex");
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "list", "--sort", "messages", "--limit", "2"])
+        .output()
+        .expect("list should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let sessions = parsed.as_array().expect("list --json should be an array");
+
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(
+        sessions[0]["session_id"].as_str(),
+        Some(complex_id.as_str())
+    );
+    assert_eq!(sessions[1]["session_id"].as_str(), Some(simple_id.as_str()));
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +573,211 @@ fn cli_resume_cursor_to_cc_works_with_source_hint() {
         .success()
         .stdout(predicate::str::contains("Converted"))
         .stdout(predicate::str::contains("cursor"))
+        .stdout(predicate::str::contains("claude-code"));
+}
+
+#[test]
+fn cli_resume_cc_to_cline_works_and_is_discoverable() {
+    let tmp = TempDir::new().unwrap();
+    let session_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "resume", "cln", &session_id])
+        .output()
+        .expect("resume should run");
+    assert!(
+        output.status.success(),
+        "CC→Cline conversion should succeed"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("resume --json output should parse");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["target_provider"].as_str().unwrap(), "cline");
+    let cline_session_id = parsed["target_session_id"]
+        .as_str()
+        .expect("target_session_id should be present for non-dry-run");
+
+    let cline_api = tmp
+        .path()
+        .join("cline/tasks")
+        .join(cline_session_id)
+        .join("api_conversation_history.json");
+    assert!(
+        cline_api.exists(),
+        "Cline task API history should exist after CC→Cline conversion"
+    );
+
+    casr_cmd(&tmp)
+        .args([
+            "--json",
+            "resume",
+            "cc",
+            cline_session_id,
+            "--source",
+            "cln",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cli_resume_cline_to_cc_works_with_source_hint() {
+    let tmp = TempDir::new().unwrap();
+    let source_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let cline_result = casr_cmd(&tmp)
+        .args(["--json", "resume", "cln", &source_id])
+        .output()
+        .expect("CC→Cline seed conversion should run");
+    assert!(cline_result.status.success());
+    let cline_json: serde_json::Value =
+        serde_json::from_slice(&cline_result.stdout).expect("seed conversion JSON should parse");
+    let cline_session_id = cline_json["target_session_id"]
+        .as_str()
+        .expect("cline target_session_id should be present");
+
+    casr_cmd(&tmp)
+        .args(["resume", "cc", cline_session_id, "--source", "cln"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Converted"))
+        .stdout(predicate::str::contains("cline"))
+        .stdout(predicate::str::contains("claude-code"));
+}
+
+#[test]
+fn cli_resume_cc_to_amp_works_and_is_discoverable() {
+    let tmp = TempDir::new().unwrap();
+    let session_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "resume", "amp", &session_id])
+        .output()
+        .expect("resume should run");
+    assert!(output.status.success(), "CC→Amp conversion should succeed");
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("resume --json output should parse");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["target_provider"].as_str().unwrap(), "amp");
+    let amp_session_id = parsed["target_session_id"]
+        .as_str()
+        .expect("target_session_id should be present for non-dry-run");
+
+    let amp_thread = tmp
+        .path()
+        .join("amp/threads")
+        .join(format!("{amp_session_id}.json"));
+    assert!(
+        amp_thread.exists(),
+        "Amp thread file should exist after CC→Amp conversion"
+    );
+
+    casr_cmd(&tmp)
+        .args([
+            "--json",
+            "resume",
+            "cc",
+            amp_session_id,
+            "--source",
+            "amp",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cli_resume_amp_to_cc_works_with_source_hint() {
+    let tmp = TempDir::new().unwrap();
+    let source_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let amp_result = casr_cmd(&tmp)
+        .args(["--json", "resume", "amp", &source_id])
+        .output()
+        .expect("CC→Amp seed conversion should run");
+    assert!(amp_result.status.success());
+    let amp_json: serde_json::Value =
+        serde_json::from_slice(&amp_result.stdout).expect("seed conversion JSON should parse");
+    let amp_session_id = amp_json["target_session_id"]
+        .as_str()
+        .expect("amp target_session_id should be present");
+
+    casr_cmd(&tmp)
+        .args(["resume", "cc", amp_session_id, "--source", "amp"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Converted"))
+        .stdout(predicate::str::contains("amp"))
+        .stdout(predicate::str::contains("claude-code"));
+}
+
+#[test]
+fn cli_resume_cc_to_aider_works_and_is_discoverable() {
+    let tmp = TempDir::new().unwrap();
+    let session_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let output = casr_cmd(&tmp)
+        .args(["--json", "resume", "aid", &session_id])
+        .output()
+        .expect("resume should run");
+    assert!(
+        output.status.success(),
+        "CC→Aider conversion should succeed"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("resume --json output should parse");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["target_provider"].as_str().unwrap(), "aider");
+    let aider_session_id = parsed["target_session_id"]
+        .as_str()
+        .expect("target_session_id should be present for non-dry-run");
+
+    let aider_history = tmp.path().join("aider/.aider.chat.history.md");
+    assert!(
+        aider_history.exists(),
+        "Aider history file should exist after CC→Aider conversion"
+    );
+
+    casr_cmd(&tmp)
+        .args([
+            "--json",
+            "resume",
+            "cc",
+            aider_session_id,
+            "--source",
+            "aid",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cli_resume_aider_to_cc_works_with_source_hint() {
+    let tmp = TempDir::new().unwrap();
+    let source_id = setup_cc_fixture(&tmp, "cc_simple");
+
+    let aider_result = casr_cmd(&tmp)
+        .args(["--json", "resume", "aid", &source_id])
+        .output()
+        .expect("CC→Aider seed conversion should run");
+    assert!(aider_result.status.success());
+    let aider_json: serde_json::Value =
+        serde_json::from_slice(&aider_result.stdout).expect("seed conversion JSON should parse");
+    let aider_session_id = aider_json["target_session_id"]
+        .as_str()
+        .expect("aider target_session_id should be present");
+
+    casr_cmd(&tmp)
+        .args(["resume", "cc", aider_session_id, "--source", "aid"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Converted"))
+        .stdout(predicate::str::contains("aider"))
         .stdout(predicate::str::contains("claude-code"));
 }
 

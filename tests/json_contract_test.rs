@@ -28,7 +28,12 @@ fn casr_cmd(tmp: &TempDir) -> Command {
         .env("CODEX_HOME", tmp.path().join("codex"))
         .env("GEMINI_HOME", tmp.path().join("gemini"))
         .env("CURSOR_HOME", tmp.path().join("cursor"))
+        .env("CLINE_HOME", tmp.path().join("cline"))
+        .env("AIDER_HOME", tmp.path().join("aider"))
+        .env("AMP_HOME", tmp.path().join("amp"))
         .env("OPENCODE_HOME", tmp.path().join("opencode"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("xdg-config"))
+        .env("XDG_DATA_HOME", tmp.path().join("xdg-data"))
         .env("NO_COLOR", "1");
     cmd
 }
@@ -232,8 +237,8 @@ fn contract_providers_json_shape() {
         .expect("providers --json should be an array");
     assert_eq!(
         arr.len(),
-        6,
-        "should list 6 providers (CC, Codex, Gemini, Cursor, Aider, OpenCode)"
+        8,
+        "should list 8 providers (CC, Codex, Gemini, Cursor, Cline, Aider, Amp, OpenCode)"
     );
 
     for (i, item) in arr.iter().enumerate() {
@@ -262,7 +267,9 @@ fn contract_providers_known_slugs() {
     assert!(slugs.contains(&"codex"), "should contain codex");
     assert!(slugs.contains(&"gemini"), "should contain gemini");
     assert!(slugs.contains(&"cursor"), "should contain cursor");
+    assert!(slugs.contains(&"cline"), "should contain cline");
     assert!(slugs.contains(&"aider"), "should contain aider");
+    assert!(slugs.contains(&"amp"), "should contain amp");
     assert!(slugs.contains(&"opencode"), "should contain opencode");
 }
 
@@ -290,7 +297,9 @@ fn contract_providers_aliases_match_slugs() {
             "codex" => assert_eq!(*alias, "cod"),
             "gemini" => assert_eq!(*alias, "gmi"),
             "cursor" => assert_eq!(*alias, "cur"),
+            "cline" => assert_eq!(*alias, "cln"),
             "aider" => assert_eq!(*alias, "aid"),
+            "amp" => assert_eq!(*alias, "amp"),
             "opencode" => assert_eq!(*alias, "opc"),
             other => panic!("Unexpected slug: {other}"),
         }
@@ -912,7 +921,9 @@ fn contract_list_provider_field_matches_slug() {
         "codex",
         "gemini",
         "cursor",
+        "cline",
         "aider",
+        "amp",
         "opencode",
     ];
     for item in parsed.as_array().unwrap() {

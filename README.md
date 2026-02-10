@@ -208,6 +208,9 @@ export CLAUDE_HOME="$HOME/.claude"
 export CODEX_HOME="$HOME/.codex"
 export GEMINI_HOME="$HOME/.gemini"
 export CURSOR_HOME="$HOME/.config/Cursor"
+export CLINE_HOME="$HOME/.config/Code/User/globalStorage/saoudrizwan.claude-dev"
+export AIDER_HOME="$HOME/.aider"
+export AMP_HOME="$HOME/.local/share/amp"
 export OPENCODE_HOME="$HOME/.opencode"
 
 # Logging verbosity (alternative to --verbose / --trace)

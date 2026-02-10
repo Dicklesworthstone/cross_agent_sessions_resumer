@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info, trace, warn};
 
 use crate::error::{Candidate, CasrError};
+use crate::model::{CanonicalSession, MessageRole};
 use crate::providers::Provider;
 
 // ---------------------------------------------------------------------------
@@ -100,7 +101,9 @@ impl ProviderRegistry {
             Box::new(crate::providers::codex::Codex),
             Box::new(crate::providers::gemini::Gemini),
             Box::new(crate::providers::cursor::Cursor),
+            Box::new(crate::providers::cline::Cline),
             Box::new(crate::providers::aider::Aider),
+            Box::new(crate::providers::amp::Amp),
             Box::new(crate::providers::opencode::OpenCode),
         ])
     }
@@ -214,23 +217,75 @@ impl ProviderRegistry {
             }
         }
 
-        // Fallback: use the first installed provider that can plausibly own this file.
-        // This handles cases where sessions are in non-standard locations.
-        warn!(
-            path = %path.display(),
-            "no provider root matched path; using file as-is with first installed provider"
-        );
-        if let Some(provider) = self.installed_providers().into_iter().next() {
+        // Path exists but does not live under any known provider session root.
+        // This can happen when users move/copy session files for archival or sharing.
+        //
+        // First, try lightweight file signature inference. If that fails, probe all
+        // providers and pick the most plausible parser.
+        if let Some(provider) = self.infer_provider_for_path(path) {
+            info!(
+                provider = provider.name(),
+                path = %path.display(),
+                "resolved session from explicit path via file signature"
+            );
             return Ok(ResolvedSession {
                 provider,
                 path: path.to_path_buf(),
             });
         }
 
-        Err(CasrError::SessionNotFound {
-            session_id: session_id.to_string(),
-            providers_checked: vec!["(direct path, no providers installed)".to_string()],
-            sessions_scanned: 0,
+        let mut best: Option<(&dyn Provider, usize, bool)> = None;
+        let mut providers_tried: Vec<String> = Vec::new();
+
+        for provider in &self.providers {
+            providers_tried.push(provider.slug().to_string());
+            let parsed = provider.read_session(path);
+            let Ok(session) = parsed else {
+                continue;
+            };
+
+            if session.messages.is_empty() {
+                continue;
+            }
+
+            let plausible = is_plausible_session(&session);
+
+            let is_better = best.is_none_or(|(best_provider, best_len, best_plausible)| {
+                (plausible, session.messages.len(), provider.slug())
+                    > (best_plausible, best_len, best_provider.slug())
+            });
+
+            if is_better {
+                best = Some((provider.as_ref(), session.messages.len(), plausible));
+            }
+        }
+
+        if let Some((provider, _len, plausible)) = best {
+            if !plausible {
+                warn!(
+                    provider = provider.name(),
+                    path = %path.display(),
+                    "no provider root matched path; selected best-effort parser (session may not be resumable)"
+                );
+            } else {
+                info!(
+                    provider = provider.name(),
+                    path = %path.display(),
+                    "resolved session from explicit path via provider probing"
+                );
+            }
+            return Ok(ResolvedSession {
+                provider,
+                path: path.to_path_buf(),
+            });
+        }
+
+        Err(CasrError::SessionReadError {
+            path: path.to_path_buf(),
+            provider: "(unknown)".to_string(),
+            detail: format!(
+                "Path is not under any provider root and could not be parsed as a session by any provider. Tried: {providers_tried:?}"
+            ),
         })
     }
 
@@ -362,6 +417,62 @@ impl ProviderRegistry {
             .iter()
             .map(|p| format!("{} ({})", p.cli_alias(), p.name()))
             .collect()
+    }
+}
+
+fn is_plausible_session(session: &CanonicalSession) -> bool {
+    if session.messages.is_empty() {
+        return false;
+    }
+    let has_user = session.messages.iter().any(|m| m.role == MessageRole::User);
+    let has_assistant = session
+        .messages
+        .iter()
+        .any(|m| m.role == MessageRole::Assistant);
+    has_user && has_assistant
+}
+
+impl ProviderRegistry {
+    fn infer_provider_for_path(&self, path: &Path) -> Option<&dyn Provider> {
+        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        match ext.as_str() {
+            "vscdb" => return self.find_by_slug("cursor"),
+            "jsonl" => {
+                let file = std::fs::File::open(path).ok()?;
+                let reader = std::io::BufReader::new(file);
+                for line in std::io::BufRead::lines(reader).map_while(Result::ok) {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+                    if value.get("type").and_then(|v| v.as_str()) == Some("session_meta") {
+                        return self.find_by_slug("codex");
+                    }
+                    if value.get("sessionId").is_some()
+                        && value.get("uuid").is_some()
+                        && value.get("cwd").is_some()
+                    {
+                        return self.find_by_slug("claude-code");
+                    }
+                    break;
+                }
+            }
+            "json" => {
+                let content = std::fs::read_to_string(path).ok()?;
+                let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+                if value.get("sessionId").is_some() && value.get("messages").is_some() {
+                    return self.find_by_slug("gemini");
+                }
+
+                if value.get("session").is_some() {
+                    return self.find_by_slug("codex");
+                }
+            }
+            _ => {}
+        }
+        None
     }
 }
 

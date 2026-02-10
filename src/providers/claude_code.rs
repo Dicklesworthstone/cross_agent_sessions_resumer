@@ -394,7 +394,8 @@ impl Provider for ClaudeCode {
         let content_bytes = lines.join("\n").into_bytes();
 
         // Use atomic write.
-        let outcome = crate::pipeline::atomic_write(&target_path, &content_bytes, opts.force)?;
+        let outcome =
+            crate::pipeline::atomic_write(&target_path, &content_bytes, opts.force, self.slug())?;
 
         info!(
             target_session_id,

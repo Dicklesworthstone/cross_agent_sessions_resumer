@@ -114,6 +114,30 @@
       "category": "synthetic",
       "intent": "Uses 'gemini' role type instead of 'model'. Tests normalize_role mapping."
     },
+    "cline_simple": {
+      "provider": "cline",
+      "format": "json",
+      "path": "cline/tasks/1700001234567/api_conversation_history.json",
+      "expected": "expected/cline_simple.json",
+      "category": "synthetic",
+      "intent": "Basic Cline task fixture with API conversation history and taskHistory metadata."
+    },
+    "amp_simple": {
+      "provider": "amp",
+      "format": "json",
+      "path": "amp/T-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.json",
+      "expected": "expected/amp_simple.json",
+      "category": "synthetic",
+      "intent": "Basic Amp centralized thread fixture with workspace and timestamp metadata."
+    },
+    "aider_simple": {
+      "provider": "aider",
+      "format": "md",
+      "path": "aider/aider_simple.md",
+      "expected": "expected/aider_simple.json",
+      "category": "synthetic",
+      "intent": "Basic Aider markdown history fixture with model/workspace metadata lines."
+    },
     "edge_empty_content_cc": {
       "provider": "claude-code",
       "format": "jsonl",

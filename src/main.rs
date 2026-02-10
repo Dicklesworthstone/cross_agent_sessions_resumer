@@ -4,6 +4,7 @@
 //!
 //! CLI entry point: parses arguments, dispatches subcommands, renders output.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -15,7 +16,7 @@ use casr::pipeline::{ConversionPipeline, ConvertOptions};
 
 /// Cross Agent Session Resumer — resume AI coding sessions across providers.
 ///
-/// Convert sessions between Claude Code, Codex, Gemini CLI, Cursor, and Aider so you can
+/// Convert sessions between Claude Code, Codex, Gemini CLI, Cursor, Cline, Aider, Amp, and OpenCode so you can
 /// pick up where you left off with a different agent.
 #[derive(Parser, Debug)]
 #[command(
@@ -45,7 +46,7 @@ struct Cli {
 enum Command {
     /// Convert and resume a session from another provider.
     Resume {
-        /// Target provider alias (cc, cod, gmi, cur, aid, opc).
+        /// Target provider alias (cc, cod, gmi, cur, cln, aid, amp, opc).
         target: String,
         /// Session ID to convert.
         session_id: String,
@@ -161,10 +162,16 @@ fn main() -> ExitCode {
         ),
         Command::List {
             provider,
-            workspace: _,
+            workspace,
             limit,
-            sort: _,
-        } => cmd_list(provider.as_deref(), limit, cli.json),
+            sort,
+        } => cmd_list(
+            provider.as_deref(),
+            workspace.as_deref(),
+            limit,
+            &sort,
+            cli.json,
+        ),
         Command::Info { session_id } => cmd_info(&session_id, cli.json),
         Command::Providers => cmd_providers(cli.json),
         Command::Completions { shell } => cmd_completions(&shell),
@@ -300,11 +307,58 @@ fn cmd_resume(
     Ok(())
 }
 
-fn cmd_list(provider_filter: Option<&str>, limit: usize, json_mode: bool) -> anyhow::Result<()> {
+fn cmd_list(
+    provider_filter: Option<&str>,
+    workspace_filter: Option<&str>,
+    limit: usize,
+    sort: &str,
+    json_mode: bool,
+) -> anyhow::Result<()> {
     let registry = ProviderRegistry::default_registry();
     let installed = registry.installed_providers();
 
-    let mut sessions: Vec<serde_json::Value> = Vec::new();
+    #[derive(Debug)]
+    struct SessionSummary {
+        session_id: String,
+        provider: String,
+        title: Option<String>,
+        messages: usize,
+        workspace: Option<PathBuf>,
+        started_at: Option<i64>,
+        path: PathBuf,
+    }
+
+    impl SessionSummary {
+        fn started_at_value(&self) -> i64 {
+            self.started_at.unwrap_or(0)
+        }
+
+        fn to_json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "session_id": self.session_id,
+                "provider": self.provider,
+                "title": self.title,
+                "messages": self.messages,
+                "workspace": self.workspace.as_ref().map(|w| w.display().to_string()),
+                "started_at": self.started_at,
+                "path": self.path.display().to_string(),
+            })
+        }
+    }
+
+    fn expand_tilde_path(value: &str) -> PathBuf {
+        if let Some(rest) = value.strip_prefix("~/")
+            && let Some(home) = dirs::home_dir()
+        {
+            home.join(rest)
+        } else {
+            PathBuf::from(value)
+        }
+    }
+
+    let workspace_filter = workspace_filter.map(expand_tilde_path);
+
+    let mut sessions: Vec<SessionSummary> = Vec::new();
 
     for provider in &installed {
         if let Some(filter) = provider_filter
@@ -341,40 +395,49 @@ fn cmd_list(provider_filter: Option<&str>, limit: usize, json_mode: bool) -> any
                 // Try to read session metadata.
                 match provider.read_session(path) {
                     Ok(session) => {
-                        sessions.push(serde_json::json!({
-                            "session_id": session.session_id,
-                            "provider": provider.slug(),
-                            "title": session.title,
-                            "messages": session.messages.len(),
-                            "workspace": session.workspace.as_ref().map(|w| w.display().to_string()),
-                            "started_at": session.started_at,
-                            "path": path.display().to_string(),
-                        }));
+                        sessions.push(SessionSummary {
+                            session_id: session.session_id,
+                            provider: provider.slug().to_string(),
+                            title: session.title,
+                            messages: session.messages.len(),
+                            workspace: session.workspace,
+                            started_at: session.started_at,
+                            path: path.to_path_buf(),
+                        });
                     }
                     Err(_) => continue,
                 }
-
-                if sessions.len() >= limit {
-                    break;
-                }
             }
-        }
-
-        if sessions.len() >= limit {
-            break;
         }
     }
 
-    // Sort by started_at descending.
-    sessions.sort_by(|a, b| {
-        let ta = a.get("started_at").and_then(|v| v.as_i64()).unwrap_or(0);
-        let tb = b.get("started_at").and_then(|v| v.as_i64()).unwrap_or(0);
-        tb.cmp(&ta)
-    });
+    if let Some(filter) = workspace_filter.as_ref() {
+        sessions.retain(|s| s.workspace.as_ref().is_some_and(|w| w.starts_with(filter)));
+    }
+
+    match sort {
+        "date" => sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at_value())),
+        "messages" => sessions.sort_by(|a, b| {
+            b.messages
+                .cmp(&a.messages)
+                .then_with(|| b.started_at_value().cmp(&a.started_at_value()))
+        }),
+        "provider" => sessions.sort_by(|a, b| {
+            a.provider
+                .cmp(&b.provider)
+                .then_with(|| b.started_at_value().cmp(&a.started_at_value()))
+        }),
+        other => {
+            return Err(anyhow::anyhow!(
+                "Unknown sort field '{other}'. Expected one of: date, messages, provider."
+            ));
+        }
+    }
     sessions.truncate(limit);
 
     if json_mode {
-        println!("{}", serde_json::to_string_pretty(&sessions)?);
+        let json: Vec<serde_json::Value> = sessions.iter().map(SessionSummary::to_json).collect();
+        println!("{}", serde_json::to_string_pretty(&json)?);
     } else {
         if sessions.is_empty() {
             println!(
@@ -389,10 +452,10 @@ fn cmd_list(provider_filter: Option<&str>, limit: usize, json_mode: bool) -> any
             sessions.len()
         );
         for s in &sessions {
-            let sid = s["session_id"].as_str().unwrap_or("?");
-            let prov = s["provider"].as_str().unwrap_or("?");
-            let title = s["title"].as_str().unwrap_or("");
-            let msgs = s["messages"].as_u64().unwrap_or(0);
+            let sid = &s.session_id;
+            let prov = &s.provider;
+            let title = s.title.as_deref().unwrap_or("");
+            let msgs = s.messages;
             let display_title = if title.len() > 60 {
                 format!("{}...", &title[..57])
             } else {
