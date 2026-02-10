@@ -5,8 +5,13 @@
 # Uses temp directories with env overrides so real provider data is never touched.
 #
 # Usage: bash scripts/e2e_test.sh
-# Optional: VERBOSE=1 bash scripts/e2e_test.sh  (show all output)
-#           CASR_BIN=/path/to/casr bash scripts/e2e_test.sh  (custom binary)
+# Optional:
+#   bash scripts/e2e_test.sh --verbose                  (show all output)
+#   VERBOSE=1 bash scripts/e2e_test.sh                  (show all output)
+#   bash scripts/e2e_test.sh --casr-bin /path/to/casr    (custom binary)
+#   CASR_BIN=/path/to/casr bash scripts/e2e_test.sh      (custom binary)
+#   bash scripts/e2e_test.sh --artifacts-dir /tmp/casr-artifacts
+#   bash scripts/e2e_test.sh --slow-threshold-ms 5000
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -19,11 +24,78 @@ FIXTURES_DIR="$PROJECT_ROOT/tests/fixtures"
 CARGO_TARGET="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}"
 CASR="${CASR_BIN:-$CARGO_TARGET/debug/casr}"
 VERBOSE="${VERBOSE:-0}"
+SLOW_THRESHOLD_MS="${SLOW_THRESHOLD_MS:-2000}"
+
+usage() {
+    cat <<'EOF'
+casr e2e test suite
+
+Usage:
+  bash scripts/e2e_test.sh [--verbose] [--casr-bin PATH] [--artifacts-dir PATH] [--slow-threshold-ms N]
+
+Flags:
+  --verbose                Show stdout/stderr snippets and extra timing diagnostics
+  --casr-bin PATH          Use a specific casr binary (default: target/debug/casr)
+  --artifacts-dir PATH     Write per-test artifacts under PATH (default: ./artifacts/e2e/<run-id>/)
+  --slow-threshold-ms N    Warn when a single casr invocation exceeds N ms (default: 2000)
+  -h, --help               Show this help and exit
+
+Environment overrides:
+  VERBOSE=1
+  CASR_BIN=/path/to/casr
+  ARTIFACTS_DIR=/path/to/artifacts
+  SLOW_THRESHOLD_MS=2000
+EOF
+}
+
+RUN_ID="$(date -u "+%Y%m%dT%H%M%S")-$$"
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-$PROJECT_ROOT/artifacts/e2e/$RUN_ID}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --verbose)
+            VERBOSE=1
+            shift
+            ;;
+        --casr-bin)
+            if [[ $# -lt 2 ]]; then
+                echo "ERROR: --casr-bin requires a path" >&2
+                exit 2
+            fi
+            CASR="$2"
+            shift 2
+            ;;
+        --artifacts-dir)
+            if [[ $# -lt 2 ]]; then
+                echo "ERROR: --artifacts-dir requires a path" >&2
+                exit 2
+            fi
+            ARTIFACTS_DIR="$2"
+            shift 2
+            ;;
+        --slow-threshold-ms)
+            if [[ $# -lt 2 ]]; then
+                echo "ERROR: --slow-threshold-ms requires a number" >&2
+                exit 2
+            fi
+            SLOW_THRESHOLD_MS="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown argument: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
 
 PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
-SLOW_THRESHOLD_MS=2000
 START_TIME=$(date +%s%N)
 
 # JSON report accumulator — array of test result objects.
@@ -66,6 +138,9 @@ export XDG_CONFIG_HOME="$TMPDIR_ROOT/xdg-config"
 export XDG_DATA_HOME="$TMPDIR_ROOT/xdg-data"
 export NO_COLOR=1
 
+mkdir -p "$ARTIFACTS_DIR"
+ARTIFACT_SEQ=0
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -97,12 +172,20 @@ fail() {
 }
 skip() { SKIP_COUNT=$((SKIP_COUNT + 1)); echo -e "  ${YELLOW}SKIP${RESET}: $1"; }
 
+slugify() {
+    echo "$1" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9]+/_/g; s/^_+//; s/_+$//'
+}
+
 # Record a test result into the JSON report.
 record_result() {
     local name="$1" status="$2" duration_ms="${3:-0}"
-    local stdout_lines stderr_lines
-    stdout_lines=$(echo "$LAST_STDOUT" | wc -l)
-    stderr_lines=$(echo "$LAST_STDERR" | wc -l)
+    local stdout_lines stderr_lines exit_code artifact_base
+    stdout_lines="${LAST_STDOUT_LINES:-0}"
+    stderr_lines="${LAST_STDERR_LINES:-0}"
+    exit_code="${LAST_EXIT:-0}"
+    artifact_base="${LAST_ARTIFACT_BASE:-}"
     local entry
     entry=$(jq -n \
         --arg n "$name" \
@@ -110,15 +193,31 @@ record_result() {
         --argjson d "$duration_ms" \
         --argjson ol "$stdout_lines" \
         --argjson el "$stderr_lines" \
-        '{test_name: $n, status: $s, duration_ms: $d, stdout_lines: $ol, stderr_lines: $el}')
+        --arg a "$artifact_base" \
+        --argjson ec "$exit_code" \
+        '{test_name: $n, status: $s, duration_ms: $d, exit_code: $ec, stdout_lines: $ol, stderr_lines: $el, artifact_base: $a}')
     JSON_RESULTS=$(echo "$JSON_RESULTS" | jq --argjson e "$entry" '. + [$e]')
 }
 
 run_casr() {
     local desc="$1"; shift
-    local stdout_file="$TMPDIR_ROOT/stdout.tmp"
-    local stderr_file="$TMPDIR_ROOT/stderr.tmp"
     local cmd_str="$CASR $*"
+
+    ARTIFACT_SEQ=$((ARTIFACT_SEQ + 1))
+    local slug artifact_base stdout_file stderr_file cmd_file stdin_file meta_file
+    slug="$(slugify "$desc")"
+    if [[ -z "$slug" ]]; then
+        slug="test"
+    fi
+    artifact_base="$ARTIFACTS_DIR/$(printf '%04d_%s' "$ARTIFACT_SEQ" "$slug")"
+    stdout_file="${artifact_base}.stdout.txt"
+    stderr_file="${artifact_base}.stderr.txt"
+    cmd_file="${artifact_base}.cmd.txt"
+    stdin_file="${artifact_base}.stdin.txt"
+    meta_file="${artifact_base}.meta.json"
+
+    printf '%s\n' "$cmd_str" > "$cmd_file"
+    : > "$stdin_file"
 
     local run_start_ms
     run_start_ms=$(ts_ms)
@@ -135,9 +234,14 @@ run_casr() {
     out_lines=$(wc -l < "$stdout_file")
     err_lines=$(wc -l < "$stderr_file")
 
-    if [[ "$VERBOSE" == "1" ]] || [[ $exit_code -ne 0 && "${EXPECT_FAIL:-0}" != "1" ]]; then
+    if [[ "$VERBOSE" == "1" ]] || [[ $exit_code -ne 0 ]]; then
         [[ -s "$stdout_file" ]] && echo "  stdout ($out_lines lines): $(head -5 "$stdout_file")"
         [[ -s "$stderr_file" ]] && echo "  stderr ($err_lines lines): $(head -5 "$stderr_file")"
+    fi
+
+    if [[ "$VERBOSE" == "1" ]] || [[ $exit_code -ne 0 ]]; then
+        echo -e "  [$(ts_fmt)] ${CYAN}TIME${RESET}: ${duration_ms}ms exit=${exit_code}"
+        echo -e "  [$(ts_fmt)] ${CYAN}ART${RESET}: ${artifact_base}.[cmd|stdin|stdout|stderr|meta].*"
     fi
 
     if [[ $duration_ms -ge $SLOW_THRESHOLD_MS ]]; then
@@ -145,9 +249,21 @@ run_casr() {
     fi
 
     LAST_EXIT=$exit_code
-    LAST_STDOUT=$(cat "$stdout_file")
-    LAST_STDERR=$(cat "$stderr_file")
+    LAST_STDOUT=$(cat "$stdout_file" 2>/dev/null || echo "")
+    LAST_STDERR=$(cat "$stderr_file" 2>/dev/null || echo "")
     LAST_DURATION_MS=$duration_ms
+    LAST_STDOUT_LINES=$out_lines
+    LAST_STDERR_LINES=$err_lines
+    LAST_ARTIFACT_BASE=$artifact_base
+
+    jq -n \
+        --arg desc "$desc" \
+        --arg cmd "$cmd_str" \
+        --argjson exit_code "$exit_code" \
+        --argjson duration_ms "$duration_ms" \
+        --arg ts "$(ts_fmt)" \
+        '{timestamp: $ts, desc: $desc, cmd: $cmd, exit_code: $exit_code, duration_ms: $duration_ms}' \
+        > "$meta_file"
 
     # Record into JSON report.
     local status_str="pass"
@@ -196,6 +312,19 @@ assert_valid_json() {
     else
         fail "$1" "valid JSON stdout" "$(echo "$LAST_STDOUT" | head -3)"
     fi
+}
+
+assert_json_error_envelope() {
+    local label="$1"
+    if echo "$LAST_STDERR" | jq -e '.ok == false and (.error_type | type == "string")' > /dev/null 2>&1; then
+        pass "$label (stderr JSON error)"
+        return
+    fi
+    if echo "$LAST_STDOUT" | jq -e '.ok == false and (.error_type | type == "string")' > /dev/null 2>&1; then
+        pass "$label (stdout JSON error)"
+        return
+    fi
+    fail "$label" "JSON error envelope with ok=false + error_type" "$(echo "$LAST_STDERR" | head -3)"
 }
 
 assert_file_exists() {
@@ -346,6 +475,7 @@ echo -e "${BOLD}casr e2e test suite${RESET}"
 echo "Binary: $CASR"
 echo "Fixtures: $FIXTURES_DIR"
 echo "Temp: $TMPDIR_ROOT"
+echo "Artifacts: $ARTIFACTS_DIR"
 echo ""
 
 # ===========================================================================
@@ -695,6 +825,8 @@ if [[ -n "$gpt_sid" ]]; then
 else
     fail "CC→ChatGPT JSON includes target_session_id" "non-empty id" "<empty>"
 fi
+assert_file_exists "ChatGPT conversation file exists after conversion" \
+    "$CHATGPT_HOME/conversations-${gpt_sid}/${gpt_sid}.json"
 
 log "TEST: Resume ChatGPT → CC"
 run_casr "resume gpt->cc" resume cc "$gpt_sid" --source gpt
@@ -717,6 +849,7 @@ if [[ -n "$cwb_sid" ]]; then
 else
     fail "CC→ClawdBot JSON includes target_session_id" "non-empty id" "<empty>"
 fi
+assert_file_exists "ClawdBot JSONL exists after conversion" "$CLAWDBOT_HOME/${cwb_sid}.jsonl"
 
 log "TEST: Resume ClawdBot → CC"
 run_casr "resume cwb->cc" resume cc "$cwb_sid" --source cwb
@@ -739,6 +872,7 @@ if [[ -n "$vib_sid" ]]; then
 else
     fail "CC→Vibe JSON includes target_session_id" "non-empty id" "<empty>"
 fi
+assert_file_exists "Vibe messages.jsonl exists after conversion" "$VIBE_HOME/${vib_sid}/messages.jsonl"
 
 log "TEST: Resume Vibe → CC"
 run_casr "resume vib->cc" resume cc "$vib_sid" --source vib
@@ -761,6 +895,8 @@ if [[ -n "$fac_sid" ]]; then
 else
     fail "CC→Factory JSON includes target_session_id" "non-empty id" "<empty>"
 fi
+factory_path=$(find "$FACTORY_HOME" -type f -name "${fac_sid}.jsonl" 2>/dev/null | head -1)
+assert_file_exists "Factory JSONL exists after conversion" "$factory_path"
 
 log "TEST: Resume Factory → CC"
 run_casr "resume fac->cc" resume cc "$fac_sid" --source fac
@@ -783,6 +919,7 @@ if [[ -n "$ocl_sid" ]]; then
 else
     fail "CC→OpenClaw JSON includes target_session_id" "non-empty id" "<empty>"
 fi
+assert_file_exists "OpenClaw JSONL exists after conversion" "$OPENCLAW_HOME/${ocl_sid}.jsonl"
 
 log "TEST: Resume OpenClaw → CC"
 run_casr "resume ocl->cc" resume cc "$ocl_sid" --source ocl
@@ -805,6 +942,7 @@ if [[ -n "$pi_sid" ]]; then
 else
     fail "CC→PiAgent JSON includes target_session_id" "non-empty id" "<empty>"
 fi
+assert_file_exists "Pi-Agent JSONL exists after conversion" "$PI_AGENT_HOME/sessions/${pi_sid}.jsonl"
 
 log "TEST: Resume PiAgent → CC"
 run_casr "resume pi->cc" resume cc "$pi_sid" --source pi
@@ -825,6 +963,61 @@ log "TEST: Resume unknown session"
 reset_env
 EXPECT_FAIL=1 run_casr "bad session" resume cod "nonexistent-session" || true
 assert_exit_fail "resume with unknown session ID fails"
+
+log "TEST: Malformed Amp session (invalid JSON)"
+reset_env
+cc_sid=$(setup_cc_fixture "cc_simple")
+run_casr "seed amp for malformed" --json resume amp "$cc_sid"
+assert_exit_ok "seed amp succeeds"
+amp_sid=$(echo "$LAST_STDOUT" | jq -r '.target_session_id // empty')
+assert_file_exists "Amp thread file exists after seed" "$AMP_HOME/threads/${amp_sid}.json"
+printf '{' > "$AMP_HOME/threads/${amp_sid}.json"
+EXPECT_FAIL=1 run_casr "malformed amp read" --json resume cc "$amp_sid" --dry-run --source amp || true
+assert_exit_fail "malformed Amp session fails"
+assert_json_error_envelope "malformed Amp error is JSON"
+
+log "TEST: Malformed Cline session (wrong JSON shape)"
+reset_env
+cc_sid=$(setup_cc_fixture "cc_simple")
+run_casr "seed cln for malformed" --json resume cln "$cc_sid"
+assert_exit_ok "seed cln succeeds"
+cline_sid=$(echo "$LAST_STDOUT" | jq -r '.target_session_id // empty')
+cline_api="$CLINE_HOME/tasks/$cline_sid/api_conversation_history.json"
+assert_file_exists "Cline API history exists after seed" "$cline_api"
+printf '{}' > "$cline_api"
+EXPECT_FAIL=1 run_casr "malformed cln read" --json resume cc "$cline_sid" --dry-run --source cln || true
+assert_exit_fail "malformed Cline session fails"
+assert_json_error_envelope "malformed Cline error is JSON"
+
+log "TEST: Malformed ChatGPT session (invalid JSON)"
+reset_env
+cc_sid=$(setup_cc_fixture "cc_simple")
+run_casr "seed gpt for malformed" --json resume gpt "$cc_sid"
+assert_exit_ok "seed gpt succeeds"
+gpt_sid=$(echo "$LAST_STDOUT" | jq -r '.target_session_id // empty')
+gpt_file="$CHATGPT_HOME/conversations-${gpt_sid}/${gpt_sid}.json"
+assert_file_exists "ChatGPT conversation exists after seed" "$gpt_file"
+printf 'not-json\n' > "$gpt_file"
+EXPECT_FAIL=1 run_casr "malformed gpt read" --json resume cc "$gpt_sid" --dry-run --source gpt || true
+assert_exit_fail "malformed ChatGPT session fails"
+assert_json_error_envelope "malformed ChatGPT error is JSON"
+
+log "TEST: Corrupt Cursor DB via --source path"
+reset_env
+mkdir -p "$CURSOR_HOME/User/globalStorage"
+printf 'not a sqlite db' > "$CURSOR_HOME/User/globalStorage/state.vscdb"
+EXPECT_FAIL=1 run_casr "cursor corrupt db" --json resume cc "dummy" --dry-run \
+    --source "$CURSOR_HOME/User/globalStorage/state.vscdb" || true
+assert_exit_fail "corrupt Cursor DB fails"
+assert_json_error_envelope "corrupt Cursor DB error is JSON"
+
+log "TEST: Corrupt OpenCode DB via --source path"
+reset_env
+mkdir -p "$OPENCODE_HOME"
+printf 'not a sqlite db' > "$OPENCODE_HOME/opencode.db"
+EXPECT_FAIL=1 run_casr "opencode corrupt db" --json resume cc "dummy" --dry-run --source "$OPENCODE_HOME/opencode.db" || true
+assert_exit_fail "corrupt OpenCode DB fails"
+assert_json_error_envelope "corrupt OpenCode DB error is JSON"
 
 # ===========================================================================
 # TEST: Verbose and trace flags

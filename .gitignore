@@ -18,9 +18,15 @@ __pycache__/
 perf.data
 perf.data.*
 
+# Coverage reports
+lcov*.info
+
 # Local scratch DBs
 storage.sqlite3
 storage.sqlite3-*
+
+# Local test artifacts
+artifacts/
 
 # bv (beads viewer) local config and caches
 .bv/
