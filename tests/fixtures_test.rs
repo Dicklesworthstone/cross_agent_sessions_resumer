@@ -9,10 +9,16 @@ use casr::model::{CanonicalSession, MessageRole};
 use casr::providers::Provider;
 use casr::providers::aider::Aider;
 use casr::providers::amp::Amp;
+use casr::providers::chatgpt::ChatGpt;
 use casr::providers::claude_code::ClaudeCode;
+use casr::providers::clawdbot::ClawdBot;
 use casr::providers::cline::Cline;
 use casr::providers::codex::Codex;
+use casr::providers::factory::Factory;
 use casr::providers::gemini::Gemini;
+use casr::providers::openclaw::OpenClaw;
+use casr::providers::pi_agent::PiAgent;
+use casr::providers::vibe::Vibe;
 
 /// Root of the fixtures directory (relative to workspace root).
 fn fixtures_dir() -> PathBuf {
@@ -391,6 +397,110 @@ fn fixture_aider_simple() {
         .expect("aider_simple should parse");
     let expected = load_expected("aider_simple");
     assert_session_matches(&session, &expected, "aider_simple");
+}
+
+// ---------------------------------------------------------------------------
+// ChatGPT fixtures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixture_chatgpt_simple() {
+    let path = fixtures_dir().join("chatgpt/chatgpt_simple.json");
+    let session = ChatGpt
+        .read_session(&path)
+        .expect("chatgpt_simple should parse");
+    let expected = load_expected("chatgpt_simple");
+    assert_session_matches(&session, &expected, "chatgpt_simple");
+}
+
+// ---------------------------------------------------------------------------
+// ClawdBot fixtures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixture_clawdbot_simple() {
+    let path = fixtures_dir().join("clawdbot/clawdbot_simple.jsonl");
+    let session = ClawdBot
+        .read_session(&path)
+        .expect("clawdbot_simple should parse");
+    let expected = load_expected("clawdbot_simple");
+    assert_session_matches(&session, &expected, "clawdbot_simple");
+}
+
+// ---------------------------------------------------------------------------
+// Vibe fixtures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixture_vibe_simple() {
+    let path = fixtures_dir().join("vibe/messages.jsonl");
+    let session = Vibe.read_session(&path).expect("vibe_simple should parse");
+    let expected = load_expected("vibe_simple");
+    assert_session_matches(&session, &expected, "vibe_simple");
+}
+
+// ---------------------------------------------------------------------------
+// Factory fixtures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixture_factory_simple() {
+    let path = fixtures_dir().join("factory/factory_simple.jsonl");
+    let session = Factory
+        .read_session(&path)
+        .expect("factory_simple should parse");
+    let expected = load_expected("factory_simple");
+    assert_session_matches(&session, &expected, "factory_simple");
+}
+
+// ---------------------------------------------------------------------------
+// OpenClaw fixtures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixture_openclaw_simple() {
+    let path = fixtures_dir().join("openclaw/openclaw_simple.jsonl");
+    let session = OpenClaw
+        .read_session(&path)
+        .expect("openclaw_simple should parse");
+    let expected = load_expected("openclaw_simple");
+    assert_session_matches(&session, &expected, "openclaw_simple");
+
+    // Extra: verify tool calls were extracted.
+    let tc_msgs: Vec<_> = session
+        .messages
+        .iter()
+        .filter(|m| !m.tool_calls.is_empty())
+        .collect();
+    assert!(
+        !tc_msgs.is_empty(),
+        "openclaw_simple should have messages with tool calls"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pi-Agent fixtures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixture_piagent_simple() {
+    let path = fixtures_dir().join("pi_agent/2025-12-01T10-00-00_pi-uuid-001.jsonl");
+    let session = PiAgent
+        .read_session(&path)
+        .expect("piagent_simple should parse");
+    let expected = load_expected("piagent_simple");
+    assert_session_matches(&session, &expected, "piagent_simple");
+
+    // Extra: verify toolResult role was normalized to Tool.
+    let tool_msgs: Vec<_> = session
+        .messages
+        .iter()
+        .filter(|m| m.role == casr::model::MessageRole::Tool)
+        .collect();
+    assert!(
+        !tool_msgs.is_empty(),
+        "piagent_simple should have Tool role messages (from toolResult)"
+    );
 }
 
 // ---------------------------------------------------------------------------

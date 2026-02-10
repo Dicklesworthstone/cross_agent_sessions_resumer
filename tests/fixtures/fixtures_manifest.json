@@ -138,6 +138,54 @@
       "category": "synthetic",
       "intent": "Basic Aider markdown history fixture with model/workspace metadata lines."
     },
+    "chatgpt_simple": {
+      "provider": "chatgpt",
+      "format": "json",
+      "path": "chatgpt/chatgpt_simple.json",
+      "expected": "expected/chatgpt_simple.json",
+      "category": "synthetic",
+      "intent": "ChatGPT mapping-format conversation with parent chain. Float timestamps, model_slug metadata."
+    },
+    "clawdbot_simple": {
+      "provider": "clawdbot",
+      "format": "jsonl",
+      "path": "clawdbot/clawdbot_simple.jsonl",
+      "expected": "expected/clawdbot_simple.json",
+      "category": "synthetic",
+      "intent": "Basic ClawdBot JSONL with RFC3339 timestamps. No workspace or model in format."
+    },
+    "vibe_simple": {
+      "provider": "vibe",
+      "format": "jsonl",
+      "path": "vibe/messages.jsonl",
+      "expected": "expected/vibe_simple.json",
+      "category": "synthetic",
+      "intent": "Basic Vibe JSONL conversation with role/content/timestamp fields."
+    },
+    "factory_simple": {
+      "provider": "factory",
+      "format": "jsonl",
+      "path": "factory/factory_simple.jsonl",
+      "expected": "expected/factory_simple.json",
+      "category": "synthetic",
+      "intent": "Factory JSONL with session_start header and typed message entries. Model from message.model."
+    },
+    "openclaw_simple": {
+      "provider": "openclaw",
+      "format": "jsonl",
+      "path": "openclaw/openclaw_simple.jsonl",
+      "expected": "expected/openclaw_simple.json",
+      "category": "synthetic",
+      "intent": "OpenClaw JSONL with session header, sequential message IDs, and toolCall content blocks."
+    },
+    "piagent_simple": {
+      "provider": "pi-agent",
+      "format": "jsonl",
+      "path": "pi_agent/2025-12-01T10-00-00_pi-uuid-001.jsonl",
+      "expected": "expected/piagent_simple.json",
+      "category": "synthetic",
+      "intent": "Pi-Agent JSONL with session header, toolResult role, and toolCall blocks. Underscore filename."
+    },
     "edge_empty_content_cc": {
       "provider": "claude-code",
       "format": "jsonl",
