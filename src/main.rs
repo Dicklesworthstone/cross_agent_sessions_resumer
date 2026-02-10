@@ -369,6 +369,29 @@ fn cmd_list(
             continue;
         }
 
+        // Prefer list_sessions() for providers that store multiple sessions
+        // in a single file/DB (avoids undercounting).
+        if let Some(listed) = provider.list_sessions() {
+            for (session_id, path) in listed {
+                match provider.read_session(&path) {
+                    Ok(session) => {
+                        sessions.push(SessionSummary {
+                            session_id: session.session_id,
+                            provider: provider.slug().to_string(),
+                            title: session.title,
+                            messages: session.messages.len(),
+                            workspace: session.workspace,
+                            started_at: session.started_at,
+                            path,
+                        });
+                    }
+                    Err(_) => continue,
+                }
+                let _ = session_id; // returned by provider for reference
+            }
+            continue;
+        }
+
         for root in provider.session_roots() {
             let walker = walkdir::WalkDir::new(&root)
                 .max_depth(4)

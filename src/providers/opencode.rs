@@ -635,6 +635,39 @@ impl Provider for OpenCode {
         // OpenCode has no session-id-specific resume flag.
         "opencode".to_string()
     }
+
+    fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {
+        let db_files = Self::find_db_files();
+        if db_files.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let mut results = Vec::new();
+        for db_path in &db_files {
+            let Ok(conn) = Self::open_db(db_path) else {
+                continue;
+            };
+            if !Self::table_exists(&conn, "sessions") {
+                continue;
+            }
+
+            let Ok(mut stmt) = conn.prepare("SELECT id FROM sessions ORDER BY created_at DESC")
+            else {
+                continue;
+            };
+
+            let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
+                continue;
+            };
+
+            for row in rows.flatten() {
+                let virtual_path = Self::virtual_session_path(db_path, &row);
+                results.push((row, virtual_path));
+            }
+        }
+
+        Some(results)
+    }
 }
 
 fn dedup_existing_files(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -1038,5 +1071,465 @@ mod tests {
         assert_eq!(tool_calls[0].name, "Read");
         assert_eq!(tool_results.len(), 1);
         assert_eq!(tool_results[0].content, "ok");
+    }
+
+    // ── parse_parts edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn parse_parts_reasoning_content_when_no_text() {
+        let raw = serde_json::json!([
+            {"type":"reasoning","data":{"thinking":"Let me analyze this problem step by step."}}
+        ]);
+        let (content, tool_calls, tool_results) = parse_parts(&raw);
+        assert_eq!(content, "Let me analyze this problem step by step.");
+        assert!(tool_calls.is_empty());
+        assert!(tool_results.is_empty());
+    }
+
+    #[test]
+    fn parse_parts_text_preferred_over_reasoning() {
+        let raw = serde_json::json!([
+            {"type":"text","data":{"text":"The answer is 42."}},
+            {"type":"reasoning","data":{"thinking":"Hmm, thinking..."}}
+        ]);
+        let (content, _, _) = parse_parts(&raw);
+        assert_eq!(content, "The answer is 42.");
+    }
+
+    #[test]
+    fn parse_parts_empty_array() {
+        let raw = serde_json::json!([]);
+        let (content, tool_calls, tool_results) = parse_parts(&raw);
+        assert!(content.is_empty());
+        assert!(tool_calls.is_empty());
+        assert!(tool_results.is_empty());
+    }
+
+    #[test]
+    fn parse_parts_non_array_returns_empty() {
+        let raw = serde_json::json!("just a string");
+        let (content, tool_calls, tool_results) = parse_parts(&raw);
+        assert!(content.is_empty());
+        assert!(tool_calls.is_empty());
+        assert!(tool_results.is_empty());
+    }
+
+    #[test]
+    fn parse_parts_unknown_type_uses_fallback() {
+        // Unknown part type with a "text" field in data → flatten_content extracts it.
+        let raw = serde_json::json!([
+            {"type":"custom_widget","data":"Some inline text from unknown part type"}
+        ]);
+        let (content, _, _) = parse_parts(&raw);
+        assert_eq!(content, "Some inline text from unknown part type");
+    }
+
+    #[test]
+    fn parse_parts_tool_result_fallback_when_no_text_or_reasoning() {
+        let raw = serde_json::json!([
+            {"type":"tool_result","data":{"tool_call_id":"c1","content":"file contents here","is_error":false}}
+        ]);
+        let (content, _, tool_results) = parse_parts(&raw);
+        assert_eq!(content, "file contents here");
+        assert_eq!(tool_results.len(), 1);
+    }
+
+    #[test]
+    fn parse_parts_multiple_text_chunks_joined() {
+        let raw = serde_json::json!([
+            {"type":"text","data":{"text":"First part."}},
+            {"type":"text","data":{"text":"Second part."}}
+        ]);
+        let (content, _, _) = parse_parts(&raw);
+        assert_eq!(content, "First part.\nSecond part.");
+    }
+
+    #[test]
+    fn parse_parts_skips_empty_text() {
+        let raw = serde_json::json!([
+            {"type":"text","data":{"text":"  "}},
+            {"type":"text","data":{"text":"real content"}}
+        ]);
+        let (content, _, _) = parse_parts(&raw);
+        assert_eq!(content, "real content");
+    }
+
+    #[test]
+    fn parse_parts_tool_call_missing_name_defaults() {
+        let raw = serde_json::json!([
+            {"type":"tool_call","data":{"id":"c1","name":"","input":"{}","type":"function"}}
+        ]);
+        let (_, tool_calls, _) = parse_parts(&raw);
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, "tool_call");
+    }
+
+    #[test]
+    fn parse_parts_tool_call_no_id_is_none() {
+        let raw = serde_json::json!([
+            {"type":"tool_call","data":{"name":"Bash","input":"{\"cmd\":\"ls\"}"}}
+        ]);
+        let (_, tool_calls, _) = parse_parts(&raw);
+        assert_eq!(tool_calls.len(), 1);
+        assert!(tool_calls[0].id.is_none());
+    }
+
+    #[test]
+    fn parse_parts_tool_result_error_flag() {
+        let raw = serde_json::json!([
+            {"type":"tool_result","data":{"tool_call_id":"c1","content":"command failed","is_error":true}}
+        ]);
+        let (_, _, tool_results) = parse_parts(&raw);
+        assert_eq!(tool_results.len(), 1);
+        assert!(tool_results[0].is_error);
+    }
+
+    // ── parse_tool_call_arguments ───────────────────────────────────────
+
+    #[test]
+    fn parse_tool_call_arguments_valid_json() {
+        let result = parse_tool_call_arguments(r#"{"path":"src/main.rs"}"#);
+        assert_eq!(result["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn parse_tool_call_arguments_empty_returns_empty_object() {
+        let result = parse_tool_call_arguments("");
+        assert_eq!(result, serde_json::json!({}));
+    }
+
+    #[test]
+    fn parse_tool_call_arguments_invalid_json_wraps_in_input() {
+        let result = parse_tool_call_arguments("not json");
+        assert_eq!(result["input"], "not json");
+    }
+
+    // ── role_to_opencode ────────────────────────────────────────────────
+
+    #[test]
+    fn role_to_opencode_all_variants() {
+        assert_eq!(role_to_opencode(&MessageRole::User), "user");
+        assert_eq!(role_to_opencode(&MessageRole::Assistant), "assistant");
+        assert_eq!(role_to_opencode(&MessageRole::Tool), "tool");
+        assert_eq!(role_to_opencode(&MessageRole::System), "system");
+        assert_eq!(
+            role_to_opencode(&MessageRole::Other("custom".to_string())),
+            "custom"
+        );
+    }
+
+    // ── build_parts ─────────────────────────────────────────────────────
+
+    #[test]
+    fn build_parts_text_only() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::User,
+            content: "Hello world".to_string(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: serde_json::json!({}),
+        };
+        let parts = build_parts(&msg);
+        let arr = parts.as_array().expect("should be array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["data"]["text"], "Hello world");
+    }
+
+    #[test]
+    fn build_parts_with_tool_call_and_result() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::Assistant,
+            content: "Let me check.".to_string(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![ToolCall {
+                id: Some("tc-1".to_string()),
+                name: "Bash".to_string(),
+                arguments: serde_json::json!({"cmd": "ls"}),
+            }],
+            tool_results: vec![ToolResult {
+                call_id: Some("tc-1".to_string()),
+                content: "file1.rs\nfile2.rs".to_string(),
+                is_error: false,
+            }],
+            extra: serde_json::json!({}),
+        };
+        let parts = build_parts(&msg);
+        let arr = parts.as_array().expect("should be array");
+        assert_eq!(arr.len(), 3); // text + tool_call + tool_result
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[1]["type"], "tool_call");
+        assert_eq!(arr[1]["data"]["name"], "Bash");
+        assert_eq!(arr[2]["type"], "tool_result");
+        assert!(!arr[2]["data"]["is_error"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn build_parts_empty_content_skips_text() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::Tool,
+            content: "  ".to_string(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![ToolResult {
+                call_id: Some("c1".to_string()),
+                content: "result".to_string(),
+                is_error: false,
+            }],
+            extra: serde_json::json!({}),
+        };
+        let parts = build_parts(&msg);
+        let arr = parts.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "tool_result");
+    }
+
+    // ── workspace_from_db_path ──────────────────────────────────────────
+
+    #[test]
+    fn workspace_from_db_path_valid() {
+        let path = PathBuf::from("/home/user/project/.opencode/opencode.db");
+        let ws = OpenCode::workspace_from_db_path(&path);
+        assert_eq!(ws, Some(PathBuf::from("/home/user/project")));
+    }
+
+    #[test]
+    fn workspace_from_db_path_wrong_dirname_returns_none() {
+        let path = PathBuf::from("/home/user/project/data/opencode.db");
+        let ws = OpenCode::workspace_from_db_path(&path);
+        assert!(ws.is_none());
+    }
+
+    #[test]
+    fn workspace_from_db_path_root_opencode_returns_none() {
+        let path = PathBuf::from("/.opencode/opencode.db");
+        let ws = OpenCode::workspace_from_db_path(&path);
+        assert_eq!(ws, Some(PathBuf::from("/")));
+    }
+
+    // ── virtual_path_special_characters ─────────────────────────────────
+
+    #[test]
+    fn virtual_path_encodes_special_characters() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let db = tmp.path().join("opencode.db");
+        std::fs::write(&db, "").expect("touch");
+
+        let sid = "session/with spaces&special=chars";
+        let vp = OpenCode::virtual_session_path(&db, sid);
+        let (parsed_db, parsed_sid) = OpenCode::parse_virtual_path(&vp).expect("parse");
+        assert_eq!(parsed_db, db);
+        assert_eq!(parsed_sid, sid);
+    }
+
+    // ── writer edge cases ───────────────────────────────────────────────
+
+    #[test]
+    fn writer_no_title_generates_from_first_user_message() {
+        let _lock = OPENCODE_ENV.lock().expect("mutex lock");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let _cwd = CwdGuard::change_to(&workspace);
+
+        let mut session = sample_session(&workspace);
+        session.title = None;
+
+        let written = OpenCode
+            .write_session(&session, &WriteOptions { force: false })
+            .expect("write");
+        let readback = OpenCode.read_session(&written.paths[0]).expect("readback");
+
+        // Title should be derived from first user message
+        assert!(readback.title.is_some());
+        let title = readback.title.unwrap();
+        assert!(title.contains("inspect"));
+    }
+
+    #[test]
+    fn writer_no_timestamps_uses_current_time() {
+        let _lock = OPENCODE_ENV.lock().expect("mutex lock");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let _cwd = CwdGuard::change_to(&workspace);
+
+        let mut session = sample_session(&workspace);
+        session.started_at = None;
+        session.ended_at = None;
+        for msg in &mut session.messages {
+            msg.timestamp = None;
+        }
+
+        let written = OpenCode
+            .write_session(&session, &WriteOptions { force: false })
+            .expect("write");
+        let readback = OpenCode.read_session(&written.paths[0]).expect("readback");
+
+        assert!(readback.started_at.is_some());
+        assert!(readback.ended_at.is_some());
+    }
+
+    #[test]
+    fn writer_model_name_propagated_to_messages() {
+        let _lock = OPENCODE_ENV.lock().expect("mutex lock");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let _cwd = CwdGuard::change_to(&workspace);
+
+        let session = sample_session(&workspace);
+        let written = OpenCode
+            .write_session(&session, &WriteOptions { force: false })
+            .expect("write");
+        let readback = OpenCode.read_session(&written.paths[0]).expect("readback");
+
+        // The model_name should be detected from message authors
+        assert!(readback.model_name.is_some());
+    }
+
+    // ── reader edge cases ───────────────────────────────────────────────
+
+    #[test]
+    fn reader_metadata_includes_token_counts() {
+        let _lock = OPENCODE_ENV.lock().expect("mutex lock");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let _cwd = CwdGuard::change_to(&workspace);
+
+        let session = sample_session(&workspace);
+        let written = OpenCode
+            .write_session(&session, &WriteOptions { force: false })
+            .expect("write");
+        let readback = OpenCode.read_session(&written.paths[0]).expect("readback");
+
+        // Metadata should include OpenCode-specific fields
+        assert!(readback.metadata.get("opencode_db").is_some());
+        assert!(readback.metadata.get("prompt_tokens").is_some());
+        assert!(readback.metadata.get("completion_tokens").is_some());
+        assert!(readback.metadata.get("cost").is_some());
+    }
+
+    #[test]
+    fn reader_message_extra_has_opencode_fields() {
+        let _lock = OPENCODE_ENV.lock().expect("mutex lock");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let _cwd = CwdGuard::change_to(&workspace);
+
+        let session = sample_session(&workspace);
+        let written = OpenCode
+            .write_session(&session, &WriteOptions { force: false })
+            .expect("write");
+        let readback = OpenCode.read_session(&written.paths[0]).expect("readback");
+
+        for msg in &readback.messages {
+            assert!(
+                msg.extra.get("opencode_message_id").is_some(),
+                "each message should have opencode_message_id in extra"
+            );
+            assert!(
+                msg.extra.get("opencode_parts").is_some(),
+                "each message should have opencode_parts in extra"
+            );
+        }
+    }
+
+    // ── dedup_existing_files ────────────────────────────────────────────
+
+    #[test]
+    fn dedup_existing_files_removes_duplicates_and_nonexistent() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let file1 = tmp.path().join("a.db");
+        let file2 = tmp.path().join("b.db");
+        std::fs::write(&file1, "").expect("touch");
+        std::fs::write(&file2, "").expect("touch");
+
+        let input = vec![
+            file1.clone(),
+            file2.clone(),
+            file1.clone(),                     // duplicate
+            tmp.path().join("nonexistent.db"), // doesn't exist
+        ];
+        let result = dedup_existing_files(input);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&file1));
+        assert!(result.contains(&file2));
+    }
+
+    #[test]
+    fn dedup_existing_files_empty_input() {
+        let result = dedup_existing_files(Vec::new());
+        assert!(result.is_empty());
+    }
+
+    // ── list_sessions ───────────────────────────────────────────────────
+
+    #[test]
+    fn list_sessions_returns_all_sessions_from_db() {
+        let _lock = OPENCODE_ENV.lock().expect("mutex lock");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let _cwd = CwdGuard::change_to(&workspace);
+
+        // Write two distinct sessions
+        let mut first = sample_session(&workspace);
+        first.title = Some("First Session".to_string());
+        first.started_at = Some(1_700_000_000_000);
+        let first_written = OpenCode
+            .write_session(&first, &WriteOptions { force: false })
+            .expect("first write");
+
+        let mut second = sample_session(&workspace);
+        second.title = Some("Second Session".to_string());
+        second.started_at = Some(1_800_000_000_000);
+        let second_written = OpenCode
+            .write_session(&second, &WriteOptions { force: false })
+            .expect("second write");
+
+        let listed = OpenCode.list_sessions().expect("should return Some");
+        assert!(
+            listed.len() >= 2,
+            "expected at least 2 sessions, got {}",
+            listed.len()
+        );
+
+        let ids: Vec<&str> = listed.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(
+            ids.contains(&first_written.session_id.as_str()),
+            "first session should be listed"
+        );
+        assert!(
+            ids.contains(&second_written.session_id.as_str()),
+            "second session should be listed"
+        );
+    }
+
+    #[test]
+    fn list_sessions_empty_db_returns_empty_vec() {
+        let _lock = OPENCODE_ENV.lock().expect("mutex lock");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".opencode")).expect("data dir");
+        let _cwd = CwdGuard::change_to(&workspace);
+
+        // Create empty DB with schema
+        let db_path = workspace.join(".opencode/opencode.db");
+        let conn = OpenCode::open_db_rw(&db_path).expect("create db");
+        OpenCode::ensure_schema(&conn).expect("schema");
+        drop(conn);
+
+        let listed = OpenCode.list_sessions().expect("should return Some");
+        assert!(listed.is_empty(), "empty DB should have no sessions");
     }
 }

@@ -79,4 +79,14 @@ pub trait Provider: Send + Sync {
 
     /// Build the shell command to resume a session with this provider.
     fn resume_command(&self, session_id: &str) -> String;
+
+    /// Enumerate all discoverable sessions for this provider.
+    ///
+    /// Returns `Some(vec)` of `(session_id, path)` pairs when the provider
+    /// stores multiple sessions in a single file or database and directory
+    /// walking alone would undercount.  The default returns `None`, which
+    /// tells the caller to fall back to directory walking + `read_session`.
+    fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {
+        None
+    }
 }

@@ -559,6 +559,27 @@ impl Provider for Aider {
     fn resume_command(&self, _session_id: &str) -> String {
         "aider --restore-chat-history".to_string()
     }
+
+    fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {
+        let history_files = Self::find_history_files();
+        if history_files.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let mut results = Vec::new();
+        for history_file in &history_files {
+            let Ok(content) = std::fs::read_to_string(history_file) else {
+                continue;
+            };
+
+            for session in Self::split_sessions(&content) {
+                let virtual_path = Self::virtual_session_path(history_file, &session.session_id);
+                results.push((session.session_id, virtual_path));
+            }
+        }
+
+        Some(results)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,6 +1097,48 @@ Hi!
     // -----------------------------------------------------------------------
     // Writer helper tests
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // list_sessions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn list_sessions_enumerates_all_sessions_in_file() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let history_path = tmp_dir.path().join(".aider.chat.history.md");
+        std::fs::write(
+            &history_path,
+            "\
+# aider chat started at 2024-08-05 19:33:02
+
+#### First session
+
+Response one
+
+# aider chat started at 2024-08-05 20:45:10
+
+#### Second session
+
+Response two
+
+# aider chat started at 2024-08-06 10:00:00
+
+#### Third session
+
+Response three
+
+",
+        )
+        .unwrap();
+
+        // split_sessions should find all 3 sessions
+        let content = std::fs::read_to_string(&history_path).unwrap();
+        let sessions = Aider::split_sessions(&content);
+        assert_eq!(sessions.len(), 3);
+        assert_eq!(sessions[0].session_id, "2024-08-05T19-33-02");
+        assert_eq!(sessions[1].session_id, "2024-08-05T20-45-10");
+        assert_eq!(sessions[2].session_id, "2024-08-06T10-00-00");
+    }
 
     #[test]
     fn writer_produces_valid_aider_markdown() {

@@ -633,6 +633,27 @@ impl Provider for Cursor {
         // Best we can do is open Cursor.
         "cursor .".to_string()
     }
+
+    fn list_sessions(&self) -> Option<Vec<(String, PathBuf)>> {
+        let db_files = Self::find_db_files();
+        if db_files.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let mut results = Vec::new();
+        for db_path in &db_files {
+            let Ok(conn) = Self::open_db(db_path) else {
+                continue;
+            };
+
+            for id in Self::list_composer_ids(&conn) {
+                let virtual_path = Self::virtual_session_path(db_path, &id);
+                results.push((id, virtual_path));
+            }
+        }
+
+        Some(results)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1436,5 +1457,42 @@ mod tests {
 
         let result = Cursor.read_session(&db_path);
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // list_sessions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn list_sessions_enumerates_all_composers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("state.vscdb");
+        let conn = create_test_db(&db_path);
+
+        // Insert two composer sessions
+        let composer_a = json!({
+            "composerId": "comp-aaa",
+            "conversation": [
+                {"bubbleId": "b1", "type": 1, "text": "User msg A"},
+                {"bubbleId": "b2", "type": 2, "text": "Assist msg A"}
+            ]
+        });
+        let composer_b = json!({
+            "composerId": "comp-bbb",
+            "conversation": [
+                {"bubbleId": "b3", "type": 1, "text": "User msg B"},
+                {"bubbleId": "b4", "type": 2, "text": "Assist msg B"}
+            ]
+        });
+        insert_kv(&conn, "composerData:comp-aaa", &composer_a);
+        insert_kv(&conn, "composerData:comp-bbb", &composer_b);
+        drop(conn);
+
+        // list_composer_ids should find both
+        let conn = Cursor::open_db(&db_path).expect("open");
+        let ids = Cursor::list_composer_ids(&conn);
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"comp-aaa".to_string()));
+        assert!(ids.contains(&"comp-bbb".to_string()));
     }
 }
