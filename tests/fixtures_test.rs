@@ -14,8 +14,10 @@ use casr::providers::claude_code::ClaudeCode;
 use casr::providers::clawdbot::ClawdBot;
 use casr::providers::cline::Cline;
 use casr::providers::codex::Codex;
+use casr::providers::cursor::Cursor;
 use casr::providers::factory::Factory;
 use casr::providers::gemini::Gemini;
+use casr::providers::opencode::OpenCode;
 use casr::providers::openclaw::OpenClaw;
 use casr::providers::pi_agent::PiAgent;
 use casr::providers::vibe::Vibe;
@@ -501,6 +503,42 @@ fn fixture_piagent_simple() {
         !tool_msgs.is_empty(),
         "piagent_simple should have Tool role messages (from toolResult)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// SQLite provider fixtures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixture_cur_simple() {
+    let path = fixtures_dir().join("cursor/state.vscdb");
+    let session = Cursor
+        .read_session(&path)
+        .expect("cur_simple should parse");
+    let expected = load_expected("cur_simple");
+    assert_session_matches(&session, &expected, "cur_simple");
+}
+
+#[test]
+fn fixture_opc_simple() {
+    let path = fixtures_dir().join("opencode/.opencode/opencode.db");
+    let session = OpenCode
+        .read_session(&path)
+        .expect("opc_simple should parse");
+    let expected = load_expected("opc_simple");
+
+    // Workspace is derived from db_path parent — skip the assertion in
+    // assert_session_matches by patching expected to match the actual value.
+    let expected_workspace = fixtures_dir().join("opencode");
+    assert_eq!(
+        session.workspace.as_deref(),
+        Some(expected_workspace.as_path()),
+        "[opc_simple] workspace should be parent of .opencode/"
+    );
+    let mut patched = expected.clone();
+    patched["workspace"] =
+        serde_json::Value::String(expected_workspace.to_string_lossy().into_owned());
+    assert_session_matches(&session, &patched, "opc_simple");
 }
 
 // ---------------------------------------------------------------------------

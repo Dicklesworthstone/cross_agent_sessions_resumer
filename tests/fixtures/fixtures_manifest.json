@@ -186,6 +186,22 @@
       "category": "synthetic",
       "intent": "Pi-Agent JSONL with session header, toolResult role, and toolCall blocks. Underscore filename."
     },
+    "cur_simple": {
+      "provider": "cursor",
+      "format": "sqlite",
+      "path": "cursor/state.vscdb",
+      "expected": "expected/cur_simple.json",
+      "category": "synthetic",
+      "intent": "Cursor state.vscdb SQLite with modern v0.40+ format. 4-message conversation with workspace in bubble."
+    },
+    "opc_simple": {
+      "provider": "opencode",
+      "format": "sqlite",
+      "path": "opencode/.opencode/opencode.db",
+      "expected": "expected/opc_simple.json",
+      "category": "synthetic",
+      "intent": "OpenCode SQLite with sessions+messages tables. 4-message session with model metadata."
+    },
     "edge_empty_content_cc": {
       "provider": "claude-code",
       "format": "jsonl",
