@@ -41,8 +41,6 @@ If I tell you to do something, even if it goes against what follows below, YOU M
   git push origin main:master
   ```
 
-**Why this matters:** Some historical scripts and URLs may still reference `master`. If `master` falls behind `main`, users can fetch stale casr code and get mismatched CLI/provider behavior.
-
 **If you see `master` referenced anywhere:**
 1. Update it to `main`
 2. Ensure `master` is synchronized: `git push origin main:master`
@@ -55,20 +53,24 @@ We only use **Cargo** in this project, NEVER any other package manager.
 
 - **Edition:** Rust 2024 (nightly required — see `rust-toolchain.toml`)
 - **Dependency versions:** Explicit versions for stability
-- **Configuration:** Cargo.toml only
+- **Configuration:** Cargo.toml only (single crate, not a workspace)
 - **Unsafe code:** Forbidden (`#![forbid(unsafe_code)]`)
 
 ### Key Dependencies
 
 | Crate | Purpose |
 |-------|---------|
-| `clap` | CLI argument parsing (`casr <target> resume <session-id>`) |
+| `clap` + `clap_complete` | CLI argument parsing and shell completions (`casr <target> resume <session-id>`) |
 | `serde` + `serde_json` | Canonical session model + provider format parsing/writing |
 | `anyhow` + `thiserror` | Internal propagation + actionable user-facing errors |
 | `chrono` | Timestamp normalization (ISO-8601, epoch seconds/millis) |
 | `walkdir` + `dirs` + `which` | Provider detection and session discovery |
+| `glob` | Pattern matching for file paths |
+| `rusqlite` | SQLite session storage (bundled) |
 | `uuid` | Target session ID generation |
+| `sha2` | Content hashing for deduplication and integrity |
 | `colored` | Terminal colors with TTY detection |
+| `urlencoding` | URL encoding for provider path handling |
 | `tracing` + `tracing-subscriber` | Structured debug/trace logging |
 | `vergen-gix` | Build metadata embedding (build.rs) |
 
@@ -120,24 +122,6 @@ We do not care about backwards compatibility—we're in early development with n
 
 ---
 
-## Output Style
-
-This tool has two output modes:
-
-- **Human-readable CLI output:** Colorized progress, warnings, and next-step resume command
-- **JSON output (`--json`):** Structured machine-readable output for automation
-
-Output behavior:
-- **Success:** Summary of source provider, conversion result, and exact resume command
-- **Dry run:** What would be converted/written without filesystem changes
-- **Error:** Actionable message with remediation hints
-- **--version/-V:** Version info with build metadata
-- **--help/-h:** Usage information
-
-Colors are automatically disabled when stderr is not a TTY (e.g., piped to file).
-
----
-
 ## Compiler Checks (CRITICAL)
 
 **After any substantive code changes, you MUST verify no errors were introduced:**
@@ -159,9 +143,16 @@ If you see errors, **carefully understand and resolve each issue**. Read suffici
 
 ## Testing
 
-### Unit Tests
+### Testing Policy
 
-The test suite covers the conversion pipeline end-to-end:
+Every module includes inline `#[cfg(test)]` unit tests alongside the implementation. Tests must cover:
+- Happy path
+- Edge cases (empty input, max values, boundary conditions)
+- Error conditions
+
+Integration tests live in the `tests/` directory.
+
+### Unit Tests
 
 ```bash
 # Run all tests
@@ -174,6 +165,7 @@ cargo test -- --nocapture
 cargo test model
 cargo test providers
 cargo test pipeline
+cargo test discovery
 ```
 
 ### End-to-End Testing
@@ -195,13 +187,22 @@ cargo run --release -- cc resume <session-id> --dry-run
 | Module | Tests | Purpose |
 |--------|-------|---------|
 | `model_tests` | Canonical helpers + timestamp/content normalization | Core IR correctness |
-| `provider_reader_tests` | Claude/Codex/Gemini parsing fixtures | Native-to-canonical fidelity |
+| `provider_reader_tests` | Claude/Codex/Gemini/Aider/Amp/ChatGPT/Cline/Cursor/OpenCode/etc. parsing fixtures | Native-to-canonical fidelity |
 | `provider_writer_tests` | Writer output + read-back compatibility | Canonical-to-native fidelity |
 | `pipeline_tests` | Detection/read/validate/write/verify orchestration | End-to-end correctness |
 | `discovery_tests` | Provider detection + session lookup | Fast and accurate ownership resolution |
 | `round_trip_tests` | Cross-provider path matrix | Conversion invariants |
 | `cli_integration_tests` | CLI UX + JSON output + error paths | User-facing behavior |
 | `e2e_script_tests` | Shell-level workflow validation | Realistic full-flow coverage |
+| `golden_output_tests` | Snapshot-based output comparison | Output format stability |
+| `fixtures_tests` | Fixture-driven provider parsing | Provider format coverage |
+| `scalability_tests` | Large session handling | Performance under load |
+| `malformed_input_tests` | Corrupt/invalid data handling | Graceful degradation |
+| `corrupted_sqlite_tests` | Broken SQLite recovery | Resilience |
+
+### Test Fixtures
+
+Test fixtures are stored in `tests/fixtures/` with per-provider format samples and expected canonical outputs.
 
 ---
 
@@ -229,21 +230,18 @@ Runs format, clippy, UBS static analysis, and unit tests. Includes:
 ### Coverage Job
 
 Runs `cargo llvm-cov` and enforces thresholds:
-- **Overall:** ≥ 70%
-- **src/model.rs:** ≥ 80%
-- **src/pipeline.rs:** ≥ 80%
+- **Overall:** >= 70%
+- **src/model.rs:** >= 80%
+- **src/pipeline.rs:** >= 80%
 
 Coverage is uploaded to Codecov for trend tracking.
 
 ### Round-Trip Job
 
 Runs the cross-provider matrix to enforce format fidelity:
-- CC→Cod
-- CC→Gmi
-- Cod→CC
-- Cod→Gmi
-- Gmi→CC
-- Gmi→Cod
+- CC<->Cod
+- CC<->Gmi
+- Cod<->Gmi
 
 Checks message count/role/content preservation and timestamp tolerance.
 
@@ -329,9 +327,9 @@ Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
 
 The version in `Cargo.toml` determines the release tag. If the current version already has a failed release, you can reuse it. Otherwise bump appropriately:
 
-- **Patch** (0.2.10 → 0.2.11): Bug fixes, no new features
-- **Minor** (0.2.x → 0.3.0): New features, backward compatible
-- **Major** (0.x → 1.0): Breaking changes
+- **Patch** (0.1.0 -> 0.1.1): Bug fixes, no new features
+- **Minor** (0.1.x -> 0.2.0): New features, backward compatible
+- **Major** (0.x -> 1.0): Breaking changes
 
 ### 4. Push and Trigger Release
 
@@ -342,7 +340,7 @@ git push origin main:master  # Keep master in sync
 
 The `release-automation.yml` workflow will:
 1. Detect version change in `Cargo.toml`
-2. Create an annotated git tag (e.g., `v0.2.13`)
+2. Create an annotated git tag (e.g., `v0.1.1`)
 3. Push the tag, which triggers `dist.yml`
 
 The `dist.yml` workflow will:
@@ -356,7 +354,7 @@ The `dist.yml` workflow will:
 
 ```bash
 gh release list --limit 5
-gh release view v0.2.13  # Check assets were uploaded
+gh release view v0.1.1  # Check assets were uploaded
 ```
 
 Expected assets per release:
@@ -380,20 +378,6 @@ Common failures:
 
 ---
 
-## Provider Format Notes (for contributors)
-
-- **Round-trip fidelity first:** Preserve provider-specific fields in `session.metadata` and `message.extra` whenever they do not map cleanly to canonical fields.
-- **Graceful parsing:** Malformed lines/events should be skipped with warnings when possible; only fail hard when the session is unusable.
-- **Timestamp normalization:** Accept ISO-8601, epoch seconds, and epoch milliseconds; canonicalize to epoch millis internally.
-- **Workspace handling:** Prefer explicit workspace fields, then heuristic extraction. Never invent ungrounded paths.
-- **Tests:** Prefer targeted tests in `src/providers/*.rs`, `src/model.rs`, and `src/pipeline.rs`.
-  - `cargo test providers`
-  - `cargo test model`
-  - `cargo test pipeline`
-  - Add positive and negative fixtures for each provider format variation.
-
----
-
 ## Third-Party Library Usage
 
 If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to find the latest documentation and current best practices.
@@ -404,17 +388,55 @@ If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to f
 
 **This is the project you're working on.** casr is a high-fidelity Rust CLI that lets users resume sessions across AI coding providers by converting through a canonical intermediate representation (IR).
 
+### What It Does
+
+Converts AI coding assistant sessions between providers (Claude Code, Codex, Gemini CLI, Aider, Amp, ChatGPT, Cline, Cursor, OpenCode, Clawdbot, Factory, OpenClaw, Pi Agent, Vibe) so you can resume work in a different tool without losing conversation context.
+
 ### Architecture
 
 ```
 CLI Input
-  → Provider Detection + Session Discovery
-  → Read Native Session Format (source provider)
-  → CanonicalSession IR
-  → Validation + Warnings
-  → Write Native Session Format (target provider)
-  → Read-back Verification
-  → Print Target Resume Command
+  -> Provider Detection + Session Discovery
+  -> Read Native Session Format (source provider)
+  -> CanonicalSession IR
+  -> Validation + Warnings
+  -> Write Native Session Format (target provider)
+  -> Read-back Verification
+  -> Print Target Resume Command
+```
+
+### Project Structure
+
+```
+cross_agent_session_resumer/
+├── Cargo.toml                        # Single crate (not a workspace)
+├── build.rs                          # vergen-gix build metadata
+├── src/
+│   ├── main.rs                       # Clap CLI and output rendering
+│   ├── lib.rs                        # Public library entry points
+│   ├── model.rs                      # Canonical session/message types + normalization helpers
+│   ├── discovery.rs                  # Provider registry, detection, cross-provider session lookup
+│   ├── pipeline.rs                   # Detect->read->validate->write->verify orchestration
+│   ├── error.rs                      # Actionable typed errors (thiserror)
+│   └── providers/
+│       ├── mod.rs                    # Provider trait + provider wiring
+│       ├── claude_code.rs            # Claude Code reader/writer
+│       ├── codex.rs                  # Codex reader/writer
+│       ├── gemini.rs                 # Gemini CLI reader/writer
+│       ├── aider.rs                  # Aider reader/writer
+│       ├── amp.rs                    # Amp reader/writer
+│       ├── chatgpt.rs               # ChatGPT reader/writer
+│       ├── cline.rs                  # Cline reader/writer
+│       ├── cursor.rs                 # Cursor reader/writer
+│       ├── opencode.rs              # OpenCode reader/writer
+│       ├── clawdbot.rs              # Clawdbot reader/writer
+│       ├── factory.rs               # Factory reader/writer
+│       ├── openclaw.rs              # OpenClaw reader/writer
+│       ├── pi_agent.rs             # Pi Agent reader/writer
+│       └── vibe.rs                  # Vibe reader/writer
+├── tests/                            # Integration tests
+├── scripts/                          # E2E and smoke test scripts
+└── docs/                             # Design docs and porting notes
 ```
 
 ### Key Files
@@ -425,7 +447,7 @@ CLI Input
 | `src/lib.rs` | Public library entry points |
 | `src/model.rs` | Canonical session/message types + normalization helpers |
 | `src/discovery.rs` | Provider registry, detection, cross-provider session lookup |
-| `src/pipeline.rs` | Detect→read→validate→write→verify orchestration |
+| `src/pipeline.rs` | Detect->read->validate->write->verify orchestration |
 | `src/error.rs` | Actionable typed errors (`thiserror`) |
 | `src/providers/mod.rs` | `Provider` trait + provider wiring |
 | `src/providers/claude_code.rs` | Claude Code reader/writer |
@@ -437,9 +459,9 @@ CLI Input
 
 - casr is built around a `Provider` trait (`detect`, `owns_session`, `read_session`, `write_session`, `resume_command`).
 - Core aliases:
-  - `cc` → Claude Code
-  - `cod` → Codex
-  - `gmi` → Gemini CLI
+  - `cc` -> Claude Code
+  - `cod` -> Codex
+  - `gmi` -> Gemini CLI
 - Provider home overrides:
   - `CLAUDE_HOME`
   - `CODEX_HOME`
@@ -461,6 +483,22 @@ CLI Input
   - `--trace`
   - `--enrich`
 
+### Output Modes
+
+This tool has two output modes:
+
+- **Human-readable CLI output:** Colorized progress, warnings, and next-step resume command
+- **JSON output (`--json`):** Structured machine-readable output for automation
+
+Output behavior:
+- **Success:** Summary of source provider, conversion result, and exact resume command
+- **Dry run:** What would be converted/written without filesystem changes
+- **Error:** Actionable message with remediation hints
+- **--version/-V:** Version info with build metadata
+- **--help/-h:** Usage information
+
+Colors are automatically disabled when stderr is not a TTY (e.g., piped to file).
+
 ### Adding New Providers
 
 1. Implement `Provider` in `src/providers/<provider>.rs`
@@ -472,6 +510,18 @@ CLI Input
 7. Add e2e coverage for conversion paths involving the new provider
 8. Update CLI docs and provider alias mapping
 
+### Provider Format Notes (for contributors)
+
+- **Round-trip fidelity first:** Preserve provider-specific fields in `session.metadata` and `message.extra` whenever they do not map cleanly to canonical fields.
+- **Graceful parsing:** Malformed lines/events should be skipped with warnings when possible; only fail hard when the session is unusable.
+- **Timestamp normalization:** Accept ISO-8601, epoch seconds, and epoch milliseconds; canonicalize to epoch millis internally.
+- **Workspace handling:** Prefer explicit workspace fields, then heuristic extraction. Never invent ungrounded paths.
+- **Tests:** Prefer targeted tests in `src/providers/*.rs`, `src/model.rs`, and `src/pipeline.rs`.
+  - `cargo test providers`
+  - `cargo test model`
+  - `cargo test pipeline`
+  - Add positive and negative fixtures for each provider format variation.
+
 ### Performance Requirements
 
 casr runs in interactive CLI loops, so latency matters:
@@ -481,6 +531,16 @@ casr runs in interactive CLI loops, so latency matters:
 - Streaming-friendly JSONL parsing for large sessions
 - No unnecessary allocations in hot discovery/parsing paths
 - Conversion should remain responsive for long multi-hundred-message sessions
+
+### Key Design Decisions
+
+- **Canonical IR** as the central pivot format — all providers read into and write from `CanonicalSession`
+- **Read-back verification** — after writing, re-read the output and compare to catch serialization bugs
+- **Actionable errors** — every error type includes remediation hints for the user
+- **Provider auto-detection** — probes filesystem in priority order, short-circuits on first match
+- **Streaming JSONL** — large sessions parsed line-by-line, not loaded entirely into memory
+- **Build metadata via vergen** — `--version` shows git SHA, build timestamp, rustc version
+- **Sigstore-signed releases** — binary authenticity verification via cosign
 
 ---
 
@@ -601,7 +661,7 @@ Core canonical types:
 Provider-local invariant:
 
 ```text
-read_P(write_P(canonical)) ≈ canonical
+read_P(write_P(canonical)) ~ canonical
 ```
 
 Cross-provider invariant:
@@ -851,21 +911,21 @@ ubs .                                   # Whole project (ignores target/, Cargo.
 ### Output Format
 
 ```
-⚠️  Category (N errors)
-    file.rs:42:5 – Issue description
-    💡 Suggested fix
+Warning  Category (N errors)
+    file.rs:42:5 - Issue description
+    Suggested fix
 Exit code: 1
 ```
 
-Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fail
+Parse: `file:line:col` -> location | Suggested fix -> how to fix | Exit 0/1 -> pass/fail
 
 ### Fix Workflow
 
-1. Read finding → category + fix suggestion
-2. Navigate `file:line:col` → view context
+1. Read finding -> category + fix suggestion
+2. Navigate `file:line:col` -> view context
 3. Verify real issue (not false positive)
 4. Fix root cause (not symptom)
-5. Re-run `ubs <file>` → exit 0
+5. Re-run `ubs <file>` -> exit 0
 6. Commit
 
 ### Bug Severity
@@ -873,6 +933,33 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 - **Critical (always fix):** Memory safety, use-after-free, data races, SQL injection
 - **Important (production):** Unwrap panics, resource leaks, overflow checks
 - **Contextual (judgment):** TODO/FIXME, println! debugging
+
+---
+
+## RCH — Remote Compilation Helper
+
+RCH offloads `cargo build`, `cargo test`, `cargo clippy`, and other compilation commands to a fleet of 8 remote Contabo VPS workers instead of building locally. This prevents compilation storms from overwhelming csd when many agents run simultaneously.
+
+**RCH is installed at `~/.local/bin/rch` and is hooked into Claude Code's PreToolUse automatically.** Most of the time you don't need to do anything if you are Claude Code — builds are intercepted and offloaded transparently.
+
+To manually offload a build:
+```bash
+rch exec -- cargo build --release
+rch exec -- cargo test
+rch exec -- cargo clippy
+```
+
+Quick commands:
+```bash
+rch doctor                    # Health check
+rch workers probe --all       # Test connectivity to all 8 workers
+rch status                    # Overview of current state
+rch queue                     # See active/waiting builds
+```
+
+If rch or its workers are unavailable, it fails open — builds run locally as normal.
+
+**Note for Codex/GPT-5.2:** Codex does not have the automatic PreToolUse hook, but you can (and should) still manually offload compute-intensive compilation commands using `rch exec -- <command>`. This avoids local resource contention when multiple agents are building simultaneously.
 
 ---
 
@@ -891,8 +978,8 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 
 ### Rule of Thumb
 
-- Need correctness or **applying changes** → `ast-grep`
-- Need raw speed or **hunting text** → `rg`
+- Need correctness or **applying changes** -> `ast-grep`
+- Need raw speed or **hunting text** -> `rg`
 - Often combine: `rg` to shortlist files, then `ast-grep` to match/modify
 
 ### Rust Examples
@@ -935,7 +1022,7 @@ rg -l -t rust 'unwrap\(' | xargs ast-grep run -l Rust -p '$X.unwrap()' --json
 
 ```
 mcp__morph-mcp__warp_grep(
-  repoPath: "/path/to/casr",
+  repoPath: "/dp/cross_agent_session_resumer",
   query: "How does provider detection and session lookup work?"
 )
 ```
@@ -944,9 +1031,9 @@ Returns structured results with file paths, line ranges, and extracted code snip
 
 ### Anti-Patterns
 
-- **Don't** use `warp_grep` to find a specific function name → use `ripgrep`
-- **Don't** use `ripgrep` to understand "how does X work" → wastes time with manual reads
-- **Don't** use `ripgrep` for codemods → risks collateral edits
+- **Don't** use `warp_grep` to find a specific function name -> use `ripgrep`
+- **Don't** use `ripgrep` to understand "how does X work" -> wastes time with manual reads
+- **Don't** use `ripgrep` for codemods -> risks collateral edits
 
 <!-- bv-agent-instructions-v1 -->
 
@@ -1006,7 +1093,7 @@ git push                # Push to remote
 ### Best Practices
 
 - Check `br ready` at session start to find available work
-- Update status as you work (in_progress → closed)
+- Update status as you work (in_progress -> closed)
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
 - Always `br sync --flush-only && git add .beads/` before ending session
@@ -1015,32 +1102,15 @@ git push                # Push to remote
 
 ## Landing the Plane (Session Completion)
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+**When ending a work session**, you MUST complete ALL steps below.
 
 **MANDATORY WORKFLOW:**
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   br sync --flush-only    # Export beads to JSONL (no git ops)
-   git add .beads/         # Stage beads changes
-   git add <other files>   # Stage code changes
-   git commit -m "..."     # Commit everything
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
+4. **Sync beads** - `br sync --flush-only` to export to JSONL
+5. **Hand off** - Provide context for next session
 
 
 ---
@@ -1058,7 +1128,7 @@ Next steps (pick one)
 
 1. Decide how to handle the unrelated modified files above so we can resume cleanly.
 2. Triage beads_rust-orko (clippy/cargo warnings) and beads_rust-ydqr (rustfmt failures).
-3. If you want a full suite run later, fix conformance/clippy blockers and re‑run cargo test --all.
+3. If you want a full suite run later, fix conformance/clippy blockers and re-run cargo test --all.
 ```
 
 NEVER EVER DO THAT AGAIN. The answer is literally ALWAYS the same: those are changes created by the potentially dozen of other agents working on the project at the same time. This is not only a common occurence, it happens multiple times PER MINUTE. The way to deal with it is simple: you NEVER, under ANY CIRCUMSTANCE, stash, revert, overwrite, or otherwise disturb in ANY way the work of other agents. Just treat those changes identically to changes that you yourself made. Just fool yourself into thinking YOU made the changes and simply don't recall it for some reason.
