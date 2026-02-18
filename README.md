@@ -88,7 +88,24 @@ Notes:
 
 ## Installation
 
-### From Source (Recommended)
+### One-Liner Install (Recommended)
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/cross_agent_session_resumer/main/install.sh?$(date +%s)" | bash
+```
+
+The installer automatically:
+- Downloads the correct binary for your platform (Linux/macOS, x86_64/ARM64)
+- Verifies SHA256 checksums and Sigstore signatures
+- Falls back to building from source if no prebuilt binary is available
+- Detects installed AI coding agent providers
+- Installs shell completions for your default shell
+- Supports `--offline TARBALL` for airgap environments
+- Supports proxy via `HTTPS_PROXY` / `HTTP_PROXY`
+
+Run `bash install.sh --help` for all options.
+
+### From Source
 
 ```bash
 git clone https://github.com/Dicklesworthstone/cross_agent_session_resumer
