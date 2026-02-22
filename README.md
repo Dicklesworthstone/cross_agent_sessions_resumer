@@ -502,4 +502,4 @@ Yes. Same-provider conversion is handled gracefully and may return a direct resu
 
 ## License
 
-MIT.
+MIT License (with OpenAI/Anthropic Rider). See [LICENSE](LICENSE).
