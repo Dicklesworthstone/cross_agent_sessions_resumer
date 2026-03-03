@@ -911,7 +911,7 @@ fn cmd_list(
                 "Top {} Most Recently Active Sessions in This Project",
                 sessions.len()
             ))
-            .header_style(Style::parse("bold white on blue").unwrap_or_default())
+            .header_style(Style::parse("bold black on bright_white").unwrap_or_default())
             .border_style(Style::parse("cyan").unwrap_or_default())
             .with_column(Column::new("#").justify(JustifyMethod::Right).width(3))
             .with_column(

@@ -315,13 +315,26 @@ impl Provider for Codex {
 }
 
 fn codex_events_for_message(msg: &CanonicalMessage, msg_ts: f64) -> Vec<serde_json::Value> {
+    // User messages that carry tool payloads must be serialized as response_item
+    // envelopes; event_msg/user_message cannot represent tool_use/tool_result blocks.
+    let user_needs_response_item = msg.role == MessageRole::User
+        && (!msg.tool_calls.is_empty() || !msg.tool_results.is_empty());
+
     match msg.role {
-        MessageRole::User => vec![serde_json::json!({
+        MessageRole::User if !user_needs_response_item => vec![serde_json::json!({
             "type": "event_msg",
             "timestamp": msg_ts,
             "payload": {
                 "type": "user_message",
                 "message": msg.content,
+            }
+        })],
+        MessageRole::User => vec![serde_json::json!({
+            "type": "response_item",
+            "timestamp": msg_ts,
+            "payload": {
+                "role": codex_role_string(&msg.role),
+                "content": codex_response_content(msg),
             }
         })],
         MessageRole::Assistant if msg.author.as_deref() == Some("reasoning") => {
@@ -779,8 +792,10 @@ fn codex_extract_text_content(content: Option<&serde_json::Value>) -> String {
                     serde_json::Value::String(s) => parts.push(s.clone()),
                     serde_json::Value::Object(obj) => {
                         let block_type = obj.get("type").and_then(|v| v.as_str());
-                        if (matches!(block_type, Some("text") | Some("input_text"))
-                            || block_type.is_none())
+                        if (matches!(
+                            block_type,
+                            Some("text") | Some("input_text") | Some("output_text")
+                        ) || block_type.is_none())
                             && let Some(text) = obj.get("text").and_then(|v| v.as_str())
                         {
                             parts.push(text.to_string());
@@ -954,6 +969,38 @@ mod tests {
     }
 
     #[test]
+    fn user_message_with_tool_payload_is_serialized_as_response_item() {
+        let msg = CanonicalMessage {
+            idx: 0,
+            role: MessageRole::User,
+            content: String::new(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![ToolCall {
+                id: Some("call-7".to_string()),
+                name: "Read".to_string(),
+                arguments: json!({"file_path":"src/main.rs"}),
+            }],
+            tool_results: vec![ToolResult {
+                call_id: Some("call-7".to_string()),
+                content: "fn main() {}".to_string(),
+                is_error: false,
+            }],
+            extra: json!({}),
+        };
+
+        let events = codex_events_for_message(&msg, 1_700_000_000.0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "response_item");
+        assert_eq!(events[0]["payload"]["role"], "user");
+        let blocks = events[0]["payload"]["content"]
+            .as_array()
+            .expect("response_item content should be array");
+        assert!(blocks.iter().any(|b| b["type"] == "tool_use"));
+        assert!(blocks.iter().any(|b| b["type"] == "tool_result"));
+    }
+
+    #[test]
     fn response_item_with_only_tool_result_is_not_dropped() {
         let file_text = serde_json::to_string(&json!({
             "type": "response_item",
@@ -1026,6 +1073,21 @@ mod tests {
             session.workspace,
             Some(std::path::PathBuf::from("/data/proj"))
         );
+    }
+
+    #[test]
+    fn reader_jsonl_assistant_output_text_is_preserved() {
+        let session = read_codex_jsonl(
+            r#"{"type":"session_meta","timestamp":1700000000.0,"payload":{"id":"out-1","cwd":"/tmp"}}
+{"type":"response_item","timestamp":1700000001.0,"payload":{"role":"user","content":[{"type":"input_text","text":"Ping"}]}}
+{"type":"response_item","timestamp":1700000002.0,"payload":{"role":"assistant","content":[{"type":"output_text","text":"Pong"}]}}"#,
+        );
+
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].role, MessageRole::User);
+        assert_eq!(session.messages[0].content, "Ping");
+        assert_eq!(session.messages[1].role, MessageRole::Assistant);
+        assert_eq!(session.messages[1].content, "Pong");
     }
 
     #[test]

@@ -27,8 +27,8 @@ use walkdir::WalkDir;
 
 use crate::discovery::DetectionResult;
 use crate::model::{
-    CanonicalMessage, CanonicalSession, MessageRole, normalize_role, parse_timestamp,
-    reindex_messages, truncate_title,
+    CanonicalMessage, CanonicalSession, MessageRole, ToolCall, ToolResult, flatten_content,
+    normalize_role, parse_timestamp, reindex_messages, truncate_title,
 };
 use crate::providers::{Provider, WriteOptions, WrittenSession};
 
@@ -272,7 +272,10 @@ impl Provider for Gemini {
             // Content: string or array of content parts.
             let content_val = msg.get("content");
             let text = gemini_extract_text_content(content_val);
-            if text.trim().is_empty() {
+            let tool_calls = gemini_extract_tool_calls(msg, content_val);
+            let tool_results = gemini_extract_tool_results(msg, content_val);
+
+            if text.trim().is_empty() && tool_calls.is_empty() && tool_results.is_empty() {
                 trace!(index = i, "skipping empty Gemini message");
                 continue;
             }
@@ -289,8 +292,8 @@ impl Provider for Gemini {
                 content: text,
                 timestamp: ts,
                 author: None,
-                tool_calls: vec![],
-                tool_results: vec![],
+                tool_calls,
+                tool_results,
                 extra: msg.clone(),
             });
         }
@@ -466,8 +469,10 @@ fn gemini_extract_text_content(content: Option<&serde_json::Value>) -> String {
                     serde_json::Value::String(s) => text_parts.push(s.clone()),
                     serde_json::Value::Object(obj) => {
                         let block_type = obj.get("type").and_then(|v| v.as_str());
-                        if (matches!(block_type, Some("text") | Some("input_text"))
-                            || block_type.is_none())
+                        if (matches!(
+                            block_type,
+                            Some("text") | Some("input_text") | Some("output_text")
+                        ) || block_type.is_none())
                             && let Some(text) = obj.get("text").and_then(|v| v.as_str())
                         {
                             text_parts.push(text.to_string());
@@ -485,6 +490,156 @@ fn gemini_extract_text_content(content: Option<&serde_json::Value>) -> String {
             .to_string(),
         _ => String::new(),
     }
+}
+
+fn gemini_extract_tool_calls(
+    message: &serde_json::Value,
+    content: Option<&serde_json::Value>,
+) -> Vec<ToolCall> {
+    let mut calls: Vec<ToolCall> = Vec::new();
+
+    if let Some(serde_json::Value::Array(parts)) = content {
+        for part in parts {
+            let Some(obj) = part.as_object() else {
+                continue;
+            };
+            if obj.get("type").and_then(|v| v.as_str()) != Some("tool_use") {
+                continue;
+            }
+
+            calls.push(ToolCall {
+                id: obj
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string),
+                name: obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                arguments: obj.get("input").cloned().unwrap_or(serde_json::Value::Null),
+            });
+        }
+    }
+
+    if let Some(tool_calls) = message.get("toolCalls").and_then(|v| v.as_array()) {
+        for call in tool_calls {
+            let Some(obj) = call.as_object() else {
+                continue;
+            };
+            calls.push(ToolCall {
+                id: obj
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string),
+                name: obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                arguments: obj.get("args").cloned().unwrap_or(serde_json::Value::Null),
+            });
+        }
+    }
+
+    calls
+}
+
+fn gemini_extract_tool_results(
+    message: &serde_json::Value,
+    content: Option<&serde_json::Value>,
+) -> Vec<ToolResult> {
+    let mut results: Vec<ToolResult> = Vec::new();
+
+    if let Some(serde_json::Value::Array(parts)) = content {
+        for part in parts {
+            let Some(obj) = part.as_object() else {
+                continue;
+            };
+            if obj.get("type").and_then(|v| v.as_str()) != Some("tool_result") {
+                continue;
+            }
+
+            let content_text = obj
+                .get("content")
+                .map(flatten_content)
+                .or_else(|| obj.get("output").map(flatten_content))
+                .unwrap_or_default();
+
+            results.push(ToolResult {
+                call_id: obj
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string),
+                content: content_text,
+                is_error: obj
+                    .get("is_error")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            });
+        }
+    }
+
+    if let Some(tool_calls) = message.get("toolCalls").and_then(|v| v.as_array()) {
+        for call in tool_calls {
+            let Some(obj) = call.as_object() else {
+                continue;
+            };
+
+            let has_result = obj.get("result").is_some() || obj.get("resultDisplay").is_some();
+            if !has_result {
+                continue;
+            }
+
+            let content_text = gemini_tool_call_result_text(call);
+            results.push(ToolResult {
+                call_id: obj
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string),
+                content: content_text,
+                is_error: obj.get("status").and_then(|v| v.as_str()) == Some("error"),
+            });
+        }
+    }
+
+    results
+}
+
+fn gemini_tool_call_result_text(call: &serde_json::Value) -> String {
+    if let Some(s) = call.get("resultDisplay").and_then(|v| v.as_str())
+        && !s.trim().is_empty()
+    {
+        return s.to_string();
+    }
+
+    if let Some(s) = call
+        .pointer("/result/0/functionResponse/response/output")
+        .and_then(|v| v.as_str())
+        && !s.trim().is_empty()
+    {
+        return s.to_string();
+    }
+
+    if let Some(s) = call
+        .pointer("/result/0/functionResponse/response/error")
+        .and_then(|v| v.as_str())
+        && !s.trim().is_empty()
+    {
+        return s.to_string();
+    }
+
+    if let Some(result) = call.get("result") {
+        let flat = flatten_content(result);
+        if !flat.trim().is_empty() {
+            return flat;
+        }
+        if let Ok(serialized) = serde_json::to_string(result) {
+            return serialized;
+        }
+    }
+
+    String::new()
 }
 
 fn gemini_message_content(msg: &CanonicalMessage) -> serde_json::Value {
@@ -854,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn reader_ignores_tool_blocks_when_flattening_text() {
+    fn reader_extracts_tool_blocks_while_flattening_text() {
         let session = read_gemini_json(
             r#"{
                 "sessionId": "gmi-tool-blocks",
@@ -869,6 +1024,61 @@ mod tests {
             }"#,
         );
         assert_eq!(session.messages[1].content, "Main answer.");
+        assert_eq!(session.messages[1].tool_calls.len(), 1);
+        assert_eq!(session.messages[1].tool_calls[0].name, "Bash");
+        assert_eq!(session.messages[1].tool_results.len(), 1);
+        assert_eq!(session.messages[1].tool_results[0].content, "ok");
+    }
+
+    #[test]
+    fn reader_extracts_top_level_tool_calls_and_results() {
+        let session = read_gemini_json(
+            r#"{
+                "sessionId": "gmi-top-toolcalls",
+                "messages": [
+                    {"type": "user", "content": "Q"},
+                    {
+                        "type": "gemini",
+                        "content": "A",
+                        "toolCalls": [
+                            {
+                                "id": "call-1",
+                                "name": "read_file",
+                                "args": {"file_path": "README.md"},
+                                "status": "success",
+                                "resultDisplay": "file contents"
+                            }
+                        ]
+                    }
+                ]
+            }"#,
+        );
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[1].tool_calls.len(), 1);
+        assert_eq!(session.messages[1].tool_calls[0].name, "read_file");
+        assert_eq!(session.messages[1].tool_results.len(), 1);
+        assert_eq!(session.messages[1].tool_results[0].content, "file contents");
+    }
+
+    #[test]
+    fn reader_keeps_tool_only_messages() {
+        let session = read_gemini_json(
+            r#"{
+                "sessionId": "gmi-tool-only",
+                "messages": [
+                    {"type": "user", "content": "Q"},
+                    {
+                        "type": "model",
+                        "content": [
+                            {"type": "tool_use", "id": "call-9", "name": "Bash", "input": {"command": "ls"}}
+                        ]
+                    }
+                ]
+            }"#,
+        );
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[1].tool_calls.len(), 1);
+        assert!(session.messages[1].content.is_empty());
     }
 
     #[test]

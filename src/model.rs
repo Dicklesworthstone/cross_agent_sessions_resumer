@@ -108,7 +108,7 @@ pub struct ToolResult {
 /// Handles all content shapes encountered across providers:
 /// - String → returned as-is
 /// - Array of `{type:"text", text:"…"}` blocks → concatenated
-/// - Array of `{type:"input_text", text:"…"}` blocks (Codex) → concatenated
+/// - Array of `{type:"input_text"| "output_text", text:"…"}` blocks (Codex/Gemini) → concatenated
 /// - Array of `{type:"tool_use", name:"…", input:{…}}` → rendered as `[Tool: name]`
 /// - Array of plain strings → joined with newlines
 /// - Object with `text` field (no `type`) → returns the text
@@ -124,7 +124,7 @@ pub fn flatten_content(value: &serde_json::Value) -> String {
                     serde_json::Value::Object(obj) => {
                         let type_field = obj.get("type").and_then(|v| v.as_str());
                         match type_field {
-                            Some("text") | Some("input_text") => {
+                            Some("text") | Some("input_text") | Some("output_text") => {
                                 if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
                                     parts.push(text.to_string());
                                 }
@@ -307,6 +307,12 @@ mod tests {
     fn flatten_content_input_text_blocks() {
         let val = json!([{"type": "input_text", "text": "codex style"}]);
         assert_eq!(flatten_content(&val), "codex style");
+    }
+
+    #[test]
+    fn flatten_content_output_text_blocks() {
+        let val = json!([{"type": "output_text", "text": "assistant output"}]);
+        assert_eq!(flatten_content(&val), "assistant output");
     }
 
     #[test]

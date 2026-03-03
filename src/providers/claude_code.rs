@@ -269,9 +269,11 @@ impl Provider for ClaudeCode {
                 .pointer("/message/content")
                 .or_else(|| entry.get("content"));
             let content = claude_extract_text_content(content_value);
+            let tool_calls = extract_tool_calls(content_value);
+            let tool_results = extract_tool_results(content_value);
 
-            // Skip empty content messages.
-            if content.trim().is_empty() {
+            // Skip messages that have neither text nor tool payloads.
+            if content.trim().is_empty() && tool_calls.is_empty() && tool_results.is_empty() {
                 trace!(line = line_num, "skipping empty content message");
                 continue;
             }
@@ -296,10 +298,6 @@ impl Provider for ClaudeCode {
             if let Some(ref m) = model {
                 *model_counts.entry(m.clone()).or_insert(0) += 1;
             }
-
-            // Extract tool calls from content blocks.
-            let tool_calls = extract_tool_calls(content_value);
-            let tool_results = extract_tool_results(content_value);
 
             messages.push(CanonicalMessage {
                 idx: 0, // Re-indexed below.
@@ -549,6 +547,14 @@ fn build_message_content(msg: &CanonicalMessage) -> serde_json::Value {
                     "id": tc.id.as_deref().unwrap_or(""),
                     "name": tc.name,
                     "input": tc.arguments,
+                }));
+            }
+            for tr in &msg.tool_results {
+                blocks.push(serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": tr.call_id.as_deref().unwrap_or(""),
+                    "content": tr.content,
+                    "is_error": tr.is_error,
                 }));
             }
             serde_json::Value::Array(blocks)
