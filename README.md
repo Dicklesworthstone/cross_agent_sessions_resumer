@@ -1,5 +1,9 @@
 # casr
 
+<div align="center">
+  <img src="casr_illustration.webp" alt="casr - Cross Agent Session Resumer">
+</div>
+
 Cross Agent Session Resumer for coding agents: resume a session created in one provider (Claude Code, Codex, Gemini, and more) using a different provider by converting through a canonical session model.
 
 ![Rust](https://img.shields.io/badge/Rust-2024%20nightly-orange)
@@ -363,6 +367,167 @@ Output
   - human output with actionable steps
   - optional JSON output for automation
 ```
+
+## Why This Is Useful in Day-to-Day Work
+
+`casr` is built for practical agent handoff problems, not only format conversion demos.
+
+- You can switch models mid-task without rebuilding context from scratch.
+- You can recover from provider outages or rate limits by moving the same session to another CLI.
+- You can keep one durable transcript while changing agent personas and tool stacks.
+- You can move a session into the provider that has the strongest tooling for the next step, then move back.
+
+Common examples:
+- Start in Codex for rapid code edits, then resume in Claude Code for architecture review.
+- Start in Gemini for long context analysis, then resume in Codex for implementation.
+- Recover old sessions from one provider and continue them in another after a tooling migration.
+
+## CLI Ergonomics and Alias Normalization
+
+`casr` supports two equivalent resume styles:
+
+- Canonical subcommand form: `casr <target> resume <session-id>`
+- Shorthand form: `casr -cc <session-id>`, `casr -cod <session-id>`, `casr -gmi <session-id>`
+
+Shorthand flags are rewritten internally before clap parsing, so logging, JSON output, and error handling stay identical across both forms.
+
+Alias normalization also accepts common provider tokens:
+
+- `claude` maps to `claude-code`
+- `codex-cli` maps to `codex`
+- `gemini-cli` maps to `gemini`
+
+## Deterministic Resolution Algorithm
+
+The resolver is intentionally strict and deterministic.
+
+1. If `--source` parses as a path, `casr` bypasses provider scanning and resolves from that path.
+2. If `--source` parses as an alias, `casr` searches only that provider.
+3. If no source hint is provided, `casr` scans installed providers and collects all matches.
+4. Zero matches returns `SessionNotFound`.
+5. One match proceeds.
+6. Multiple matches returns `AmbiguousSessionId` and includes candidates.
+
+Path mode has additional fallback logic when a file is outside known provider roots:
+
+1. Try extension and file-signature heuristics.
+2. If heuristics fail, ask each provider parser to read the file.
+3. Rank successful parses by plausibility and message count.
+
+Plausibility currently requires at least one user message and one assistant message.
+
+## Detailed Pipeline Contract
+
+The conversion pipeline in `src/pipeline.rs` has a fixed stage order:
+
+1. Resolve target provider from alias.
+2. Resolve source session.
+3. Read source into canonical IR.
+4. Validate canonical session.
+5. Optionally prepend synthetic enrichment context (`--enrich`).
+6. Short-circuit on `--dry-run`.
+7. Short-circuit same-provider conversion when enrichment is not requested.
+8. Write target-native session.
+9. Re-read written output and verify structural fidelity.
+
+If read-back verification fails, `casr` rolls back written files and restores backups when available. This keeps failed conversions from leaving unverified artifacts in target storage.
+
+## Core Normalization Algorithms
+
+### Content normalization (`flatten_content`)
+
+`casr` accepts several message content shapes and normalizes them into canonical text:
+
+- Plain strings.
+- Arrays of text blocks.
+- Arrays of Codex-style `input_text` blocks.
+- Tool-use blocks with fallback textual descriptions.
+- Objects containing `text` or ChatGPT-style `parts`.
+
+This allows each provider adapter to keep format-specific parsing small while still converging on one canonical message representation.
+
+### Timestamp normalization (`parse_timestamp`)
+
+The parser accepts:
+
+- Integer epoch seconds and epoch milliseconds.
+- Floating-point seconds.
+- Numeric strings.
+- RFC3339 and common ISO-8601 formats.
+
+Heuristic detail: values below `100_000_000_000` are treated as seconds; larger values are treated as milliseconds.
+
+### Role normalization and verification buckets
+
+Roles are normalized to `User`, `Assistant`, `Tool`, `System`, or `Other(String)`.
+Read-back verification compares role buckets rather than raw role enums for known lossy formats. For example, providers that collapse non-assistant roles into a single user-like entry type still pass verification when semantic intent is preserved.
+
+## Atomic Write and Recovery Semantics
+
+`casr` write operations are temp-then-rename and include rollback behavior:
+
+1. Create parent directories if needed.
+2. If target exists and `--force` is not set, return conflict.
+3. If target exists and `--force` is set, rename target to a deduplicated backup (`.bak`, `.bak.1`, and so on).
+4. Write full content to temp file in the same directory.
+5. Flush and `sync_all` temp file.
+6. Rename temp file to target path.
+
+If any step fails:
+
+- Temp files are cleaned up.
+- Existing backups are restored to original target paths.
+- Errors include provider and path context for debugging.
+
+## `casr list` Selection and Ranking Internals
+
+The `list` command is optimized for project-local triage first.
+
+- Default scope is the current working directory project.
+- `--workspace` can override scope explicitly.
+- Provider-specific path hints are used for fast filtering (`claude-code`, `gemini`).
+- Providers that support `list_sessions()` can bypass expensive filesystem walks.
+- Fallback directory scans are capped by depth and extension filters.
+
+When sorting by date, probe size is capped to avoid slow scans:
+
+- Workspace-scoped mode uses `max(limit * 3, 30)`.
+- Global mode uses `max(limit * 8, 30)`.
+
+`Last Active` is computed from canonical conversation activity and file modification time, then rendered as relative age.
+
+## Performance and Scaling Notes
+
+- Resolution without a source hint is `O(number_of_installed_providers)` for ownership checks.
+- Path fallback parsing runs only when root-based ownership and signatures are inconclusive.
+- Listing can still be I/O-heavy on very large session trees, but probe caps and provider-native listing APIs keep it bounded in normal use.
+- Providers that store many sessions inside one DB/file can implement `list_sessions()` for efficient enumeration and better counts.
+
+## Design Principles Behind the Implementation
+
+- Deterministic behavior over clever heuristics.
+- Fail safely with explicit errors and rollback.
+- Preserve session content first; preserve provider metadata when practical.
+- Prefer additive warnings over hard failure when a conversion is still useful.
+- Keep provider adapters independent behind one trait so new providers do not require pipeline rewrites.
+
+## Adding a New Provider
+
+To add a provider, implement the `Provider` trait in `src/providers/<provider>.rs`:
+
+- `detect()`: installation probe with useful evidence strings.
+- `session_roots()` and `owns_session()`: discovery hooks.
+- `read_session()`: native format to canonical model.
+- `write_session()`: canonical model to native format.
+- `resume_command()`: exact command users should run after conversion.
+- `list_sessions()` (optional): optimized multi-session enumeration for DB-backed providers.
+
+Recommended test set for new providers:
+
+- Reader and writer unit tests for native fixtures.
+- Round-trip tests (`read(write(read(...)))`).
+- CLI integration test path through `casr list`, `casr info`, and `casr <target> resume`.
+- Error-path tests for malformed input and file I/O failures.
 
 ## Provider Format Notes
 
