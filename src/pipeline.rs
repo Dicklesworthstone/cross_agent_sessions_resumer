@@ -101,19 +101,6 @@ pub fn validate_session(session: &CanonicalSession) -> ValidationResult {
             .push("Session has no timestamps. Message ordering may be unreliable.".to_string());
     }
 
-    // Unusual role ordering: two user or two assistant messages in a row.
-    for window in session.messages.windows(2) {
-        if window[0].role == window[1].role
-            && matches!(window[0].role, MessageRole::User | MessageRole::Assistant)
-        {
-            result.warnings.push(format!(
-                "Consecutive {:?} messages at indices {} and {} — may confuse target agent.",
-                window[0].role, window[0].idx, window[1].idx
-            ));
-            break; // One warning is enough.
-        }
-    }
-
     if session.messages.len() < 3 {
         result.warnings.push(
             "Very short session (<3 messages). May not provide enough context for resumption."

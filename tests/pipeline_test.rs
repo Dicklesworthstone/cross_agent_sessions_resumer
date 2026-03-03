@@ -823,10 +823,6 @@ fn validate_session_warnings_and_info_for_quality_issues() {
     let warnings = validation.warnings.join("\n");
     assert!(warnings.contains("no workspace"), "warnings: {warnings}");
     assert!(warnings.contains("no timestamps"), "warnings: {warnings}");
-    assert!(
-        warnings.contains("Consecutive User"),
-        "warnings: {warnings}"
-    );
     let info_joined = validation.info.join("\n");
     assert!(
         info_joined.contains("unknown tool call id"),
