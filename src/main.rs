@@ -18,6 +18,9 @@ use tracing_subscriber::EnvFilter;
 
 use casr::discovery::ProviderRegistry;
 use casr::pipeline::{ConversionPipeline, ConvertOptions};
+use casr::responses::{
+    self, ErrorEnvelope, InfoResponse, ListEnvelope, ListItem, ProviderInfo, ResumeSuccess,
+};
 
 /// Cross Agent Session Resumer — resume AI coding sessions across providers.
 ///
@@ -249,14 +252,10 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             if cli.json {
-                let json = serde_json::json!({
-                    "ok": false,
-                    "error_type": error_type_name(&e),
-                    "message": format!("{e}"),
-                });
+                let envelope = ErrorEnvelope::new(error_type_name(&e), format!("{e}"));
                 eprintln!(
                     "{}",
-                    serde_json::to_string_pretty(&json).unwrap_or_default()
+                    serde_json::to_string_pretty(&envelope).unwrap_or_default()
                 );
             } else {
                 eprintln!("{} {e}", "Error:".red().bold());
@@ -312,18 +311,29 @@ fn cmd_resume(
     let result = pipeline.convert(target, session_id, opts)?;
 
     if json_mode {
-        let json = serde_json::json!({
-            "ok": true,
-            "source_provider": result.source_provider,
-            "target_provider": result.target_provider,
-            "source_session_id": result.canonical_session.session_id,
-            "target_session_id": result.written.as_ref().map(|w| &w.session_id),
-            "written_paths": result.written.as_ref().map(|w| &w.paths),
-            "resume_command": result.written.as_ref().map(|w| &w.resume_command),
-            "dry_run": result.written.is_none(),
-            "warnings": result.warnings,
-        });
-        println!("{}", serde_json::to_string_pretty(&json)?);
+        let response = ResumeSuccess {
+            ok: true,
+            source_provider: result.source_provider.clone(),
+            target_provider: result.target_provider.clone(),
+            source_session_id: result.canonical_session.session_id.clone(),
+            target_session_id: result
+                .written
+                .as_ref()
+                .map(|w| w.session_id.clone()),
+            written_paths: result.written.as_ref().map(|w| {
+                w.paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect()
+            }),
+            resume_command: result
+                .written
+                .as_ref()
+                .map(|w| w.resume_command.clone()),
+            dry_run: result.written.is_none(),
+            warnings: result.warnings.clone(),
+        };
+        println!("{}", serde_json::to_string_pretty(&response)?);
     } else if let Some(ref written) = result.written {
         println!(
             "{} Converted {} session to {}",
@@ -442,23 +452,28 @@ fn cmd_list(
                 .unwrap_or_else(|| "-".to_string())
         }
 
-        fn to_json(&self) -> serde_json::Value {
-            serde_json::json!({
-                "session_id": self.session_id,
-                "provider": self.provider,
-                "title": self.title,
-                "messages": self.messages,
-                "workspace": self.workspace.as_ref().map(|w| w.display().to_string()),
-                "started_at": self.started_at,
-                "last_active_at": self.last_active_at,
-                "file_size_bytes": self.file_size_bytes,
-                "file_size_kb": self.file_size_kb_rounded(),
-                "unique_user_messages": self.unique_user_messages,
-                "avg_agent_response_chars": self.avg_agent_response_chars,
-                "avg_agent_response_chars_rounded": self.avg_agent_chars_rounded(),
-                "tool_uses": self.tool_uses,
-                "path": self.path.display().to_string(),
-            })
+        fn to_list_item(&self) -> ListItem {
+            let (workspace_name, workspace_name_source) =
+                responses::workspace_name_from_path(self.workspace.as_ref());
+            ListItem {
+                schema_version: responses::SCHEMA_VERSION,
+                session_id: self.session_id.clone(),
+                provider: self.provider.clone(),
+                title: self.title.clone(),
+                messages: self.messages,
+                workspace: self.workspace.as_ref().map(|w| w.display().to_string()),
+                started_at: self.started_at,
+                last_active_at: self.last_active_at,
+                file_size_bytes: self.file_size_bytes,
+                file_size_kb: self.file_size_kb_rounded(),
+                unique_user_messages: self.unique_user_messages,
+                avg_agent_response_chars: self.avg_agent_response_chars,
+                avg_agent_response_chars_rounded: self.avg_agent_chars_rounded(),
+                tool_uses: self.tool_uses,
+                path: self.path.display().to_string(),
+                workspace_name,
+                workspace_name_source,
+            }
         }
     }
 
@@ -1176,13 +1191,14 @@ fn cmd_list(
     );
 
     if json_mode {
-        let mut json: Vec<serde_json::Value> = Vec::new();
+        let mut items: Vec<ListItem> = Vec::new();
         for sessions in sessions_by_provider.values() {
             for session in sessions {
-                json.push(session.to_json());
+                items.push(session.to_list_item());
             }
         }
-        println!("{}", serde_json::to_string_pretty(&json)?);
+        let envelope = ListEnvelope::new(items);
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
     } else {
         if non_empty_group_count == 0 {
             println!(
@@ -1298,19 +1314,24 @@ fn cmd_info(session_id: &str, json_mode: bool) -> anyhow::Result<()> {
     let session = resolved.provider.read_session(&resolved.path)?;
 
     if json_mode {
-        let json = serde_json::json!({
-            "session_id": session.session_id,
-            "provider": session.provider_slug,
-            "title": session.title,
-            "workspace": session.workspace.as_ref().map(|w| w.display().to_string()),
-            "messages": session.messages.len(),
-            "started_at": session.started_at,
-            "ended_at": session.ended_at,
-            "model_name": session.model_name,
-            "source_path": session.source_path.display().to_string(),
-            "metadata": session.metadata,
-        });
-        println!("{}", serde_json::to_string_pretty(&json)?);
+        let (workspace_name, workspace_name_source) =
+            responses::workspace_name_from_path(session.workspace.as_ref());
+        let response = InfoResponse {
+            schema_version: responses::SCHEMA_VERSION,
+            session_id: session.session_id.clone(),
+            provider: session.provider_slug.clone(),
+            title: session.title.clone(),
+            workspace: session.workspace.as_ref().map(|w| w.display().to_string()),
+            messages: session.messages.len(),
+            started_at: session.started_at,
+            ended_at: session.ended_at,
+            model_name: session.model_name.clone(),
+            source_path: session.source_path.display().to_string(),
+            metadata: session.metadata.clone(),
+            workspace_name,
+            workspace_name_source,
+        };
+        println!("{}", serde_json::to_string_pretty(&response)?);
     } else {
         println!("{}\n", "Session Info".bold());
         println!("  {} {}", "ID:".dimmed(), session.session_id.cyan());
@@ -1352,17 +1373,15 @@ fn cmd_providers(json_mode: bool) -> anyhow::Result<()> {
     let results = registry.detect_all();
 
     if json_mode {
-        let providers: Vec<serde_json::Value> = results
+        let providers: Vec<ProviderInfo> = results
             .iter()
-            .map(|(p, det)| {
-                serde_json::json!({
-                    "name": p.name(),
-                    "slug": p.slug(),
-                    "alias": p.cli_alias(),
-                    "installed": det.installed,
-                    "version": det.version,
-                    "evidence": det.evidence,
-                })
+            .map(|(p, det)| ProviderInfo {
+                name: p.name().to_string(),
+                slug: p.slug().to_string(),
+                alias: p.cli_alias().to_string(),
+                installed: det.installed,
+                version: det.version.clone(),
+                evidence: det.evidence.clone(),
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&providers)?);

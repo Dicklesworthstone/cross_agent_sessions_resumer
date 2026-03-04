@@ -10,3 +10,4 @@ pub mod error;
 pub mod model;
 pub mod pipeline;
 pub mod providers;
+pub mod responses;

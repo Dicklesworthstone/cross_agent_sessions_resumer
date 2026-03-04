@@ -342,13 +342,27 @@ fn contract_providers_aliases_match_slugs() {
 // ---------------------------------------------------------------------------
 // Contract: `list --json`
 // ---------------------------------------------------------------------------
-// Expected shape: Array of {session_id, provider, title, messages, workspace, started_at, path}
+// Expected shape: { schema_version: 2, items: [{ schema_version, session_id, provider, ... }] }
+
+fn assert_list_envelope(parsed: &serde_json::Value) -> &Vec<serde_json::Value> {
+    let ctx = "list_envelope";
+    assert_exact_keys(parsed, &["schema_version", "items"], ctx);
+    assert_uint(&parsed["schema_version"], "schema_version", ctx);
+    assert_eq!(
+        parsed["schema_version"].as_u64().unwrap(),
+        2,
+        "{ctx}: schema_version should be 2"
+    );
+    assert_array(&parsed["items"], "items", ctx);
+    parsed["items"].as_array().unwrap()
+}
 
 fn assert_list_item(obj: &serde_json::Value, idx: usize) {
     let ctx = format!("list[{idx}]");
     assert_exact_keys(
         obj,
         &[
+            "schema_version",
             "session_id",
             "provider",
             "title",
@@ -363,8 +377,16 @@ fn assert_list_item(obj: &serde_json::Value, idx: usize) {
             "last_active_at",
             "tool_uses",
             "unique_user_messages",
+            "workspace_name",
+            "workspace_name_source",
         ],
         &ctx,
+    );
+    assert_uint(&obj["schema_version"], "schema_version", &ctx);
+    assert_eq!(
+        obj["schema_version"].as_u64().unwrap(),
+        2,
+        "{ctx}: per-item schema_version should be 2"
     );
     assert_string(&obj["session_id"], "session_id", &ctx);
     assert_string(&obj["provider"], "provider", &ctx);
@@ -373,6 +395,8 @@ fn assert_list_item(obj: &serde_json::Value, idx: usize) {
     assert_string_or_null(&obj["workspace"], "workspace", &ctx);
     assert_number_or_null(&obj["started_at"], "started_at", &ctx);
     assert_string(&obj["path"], "path", &ctx);
+    assert_string_or_null(&obj["workspace_name"], "workspace_name", &ctx);
+    assert_string_or_null(&obj["workspace_name_source"], "workspace_name_source", &ctx);
 }
 
 #[test]
@@ -388,8 +412,8 @@ fn contract_list_json_empty() {
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("Invalid JSON from list: {e}\nOutput: {stdout}"));
 
-    let arr = parsed.as_array().expect("list --json should be an array");
-    assert!(arr.is_empty(), "empty env should yield empty list");
+    let items = assert_list_envelope(&parsed);
+    assert!(items.is_empty(), "empty env should yield empty items");
 }
 
 #[test]
@@ -407,15 +431,15 @@ fn contract_list_json_shape_cc() {
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("Invalid JSON from list: {e}\nOutput: {stdout}"));
 
-    let arr = parsed.as_array().expect("should be array");
-    assert!(!arr.is_empty(), "should find at least one session");
+    let items = assert_list_envelope(&parsed);
+    assert!(!items.is_empty(), "should find at least one session");
 
-    for (i, item) in arr.iter().enumerate() {
+    for (i, item) in items.iter().enumerate() {
         assert_list_item(item, i);
     }
 
     // First item should be from claude-code.
-    assert_eq!(arr[0]["provider"].as_str().unwrap(), "claude-code");
+    assert_eq!(items[0]["provider"].as_str().unwrap(), "claude-code");
 }
 
 #[test]
@@ -433,13 +457,13 @@ fn contract_list_json_shape_codex() {
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("Invalid JSON from list: {e}\nOutput: {stdout}"));
 
-    let arr = parsed.as_array().expect("should be array");
-    assert!(!arr.is_empty(), "should find codex session");
+    let items = assert_list_envelope(&parsed);
+    assert!(!items.is_empty(), "should find codex session");
 
-    for (i, item) in arr.iter().enumerate() {
+    for (i, item) in items.iter().enumerate() {
         assert_list_item(item, i);
     }
-    assert_eq!(arr[0]["provider"].as_str().unwrap(), "codex");
+    assert_eq!(items[0]["provider"].as_str().unwrap(), "codex");
 }
 
 #[test]
@@ -466,13 +490,13 @@ fn contract_list_json_shape_gemini() {
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("Invalid JSON from list: {e}\nOutput: {stdout}"));
 
-    let arr = parsed.as_array().expect("should be array");
-    assert!(!arr.is_empty(), "should find gemini session");
+    let items = assert_list_envelope(&parsed);
+    assert!(!items.is_empty(), "should find gemini session");
 
-    for (i, item) in arr.iter().enumerate() {
+    for (i, item) in items.iter().enumerate() {
         assert_list_item(item, i);
     }
-    assert_eq!(arr[0]["provider"].as_str().unwrap(), "gemini");
+    assert_eq!(items[0]["provider"].as_str().unwrap(), "gemini");
 }
 
 #[test]
@@ -488,7 +512,8 @@ fn contract_list_json_messages_is_nonnegative() {
     let parsed: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
 
-    for item in parsed.as_array().unwrap() {
+    let items = assert_list_envelope(&parsed);
+    for item in items {
         let msgs = item["messages"].as_u64().unwrap();
         assert!(msgs > 0, "cc_simple fixture should have at least 1 message");
     }
@@ -497,14 +522,16 @@ fn contract_list_json_messages_is_nonnegative() {
 // ---------------------------------------------------------------------------
 // Contract: `info --json`
 // ---------------------------------------------------------------------------
-// Expected shape: {session_id, provider, title, workspace, messages, started_at,
-//                  ended_at, model_name, source_path, metadata}
+// Expected shape: {schema_version, session_id, provider, title, workspace,
+//                  messages, started_at, ended_at, model_name, source_path,
+//                  metadata, workspace_name, workspace_name_source}
 
 fn assert_info_object(obj: &serde_json::Value) {
     let ctx = "info";
     assert_exact_keys(
         obj,
         &[
+            "schema_version",
             "session_id",
             "provider",
             "title",
@@ -515,8 +542,16 @@ fn assert_info_object(obj: &serde_json::Value) {
             "model_name",
             "source_path",
             "metadata",
+            "workspace_name",
+            "workspace_name_source",
         ],
         ctx,
+    );
+    assert_uint(&obj["schema_version"], "schema_version", ctx);
+    assert_eq!(
+        obj["schema_version"].as_u64().unwrap(),
+        2,
+        "{ctx}: schema_version should be 2"
     );
     assert_string(&obj["session_id"], "session_id", ctx);
     assert_string(&obj["provider"], "provider", ctx);
@@ -532,6 +567,8 @@ fn assert_info_object(obj: &serde_json::Value) {
         obj["metadata"].is_object() || obj["metadata"].is_null(),
         "{ctx}: metadata should be object|null"
     );
+    assert_string_or_null(&obj["workspace_name"], "workspace_name", ctx);
+    assert_string_or_null(&obj["workspace_name_source"], "workspace_name_source", ctx);
 }
 
 #[test]
@@ -980,6 +1017,8 @@ fn contract_list_provider_field_matches_slug() {
     let parsed: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
 
+    let items = parsed["items"].as_array().expect("should have items array");
+
     let valid_slugs = [
         "claude-code",
         "codex",
@@ -996,7 +1035,7 @@ fn contract_list_provider_field_matches_slug() {
         "openclaw",
         "pi-agent",
     ];
-    for item in parsed.as_array().unwrap() {
+    for item in items {
         let provider = item["provider"].as_str().unwrap();
         assert!(
             valid_slugs.contains(&provider),
