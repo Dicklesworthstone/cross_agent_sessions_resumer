@@ -271,7 +271,7 @@ impl Provider for Gemini {
 
             // Content: string or array of content parts.
             let content_val = msg.get("content");
-            let text = gemini_extract_text_content(content_val);
+            let text = gemini_extract_text_content(msg, content_val);
             let tool_calls = gemini_extract_tool_calls(msg, content_val);
             let tool_results = gemini_extract_tool_results(msg, content_val);
 
@@ -455,36 +455,107 @@ fn gemini_message_type(msg: &CanonicalMessage) -> String {
     }
 }
 
-fn gemini_extract_text_content(content: Option<&serde_json::Value>) -> String {
-    let Some(value) = content else {
-        return String::new();
+fn gemini_extract_text_content(
+    message: &serde_json::Value,
+    content: Option<&serde_json::Value>,
+) -> String {
+    let extracted = match content {
+        Some(value) => match value {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(parts) => {
+                let mut text_parts: Vec<String> = Vec::new();
+                for part in parts {
+                    match part {
+                        serde_json::Value::String(s) => text_parts.push(s.clone()),
+                        serde_json::Value::Object(obj) => {
+                            let block_type = obj.get("type").and_then(|v| v.as_str());
+                            if (matches!(
+                                block_type,
+                                Some("text") | Some("input_text") | Some("output_text")
+                            ) || block_type.is_none())
+                                && let Some(text) = obj.get("text").and_then(|v| v.as_str())
+                            {
+                                text_parts.push(text.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                text_parts.join("\n")
+            }
+            serde_json::Value::Object(obj) => obj
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            _ => String::new(),
+        },
+        None => String::new(),
     };
 
+    if !extracted.trim().is_empty() {
+        return extracted;
+    }
+
+    // Gemini often stores assistant prose in `thoughts` while keeping
+    // `content` empty when messages are tool-heavy. Preserve this fallback so
+    // list/info metrics and cross-provider transforms don't look artificially
+    // sparse.
+    message
+        .get("thoughts")
+        .map(gemini_extract_thoughts_text)
+        .unwrap_or_default()
+}
+
+fn gemini_extract_thoughts_text(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(parts) => {
-            let mut text_parts: Vec<String> = Vec::new();
-            for part in parts {
-                match part {
-                    serde_json::Value::String(s) => text_parts.push(s.clone()),
-                    serde_json::Value::Object(obj) => {
-                        let block_type = obj.get("type").and_then(|v| v.as_str());
-                        if (matches!(
-                            block_type,
-                            Some("text") | Some("input_text") | Some("output_text")
-                        ) || block_type.is_none())
-                            && let Some(text) = obj.get("text").and_then(|v| v.as_str())
-                        {
-                            text_parts.push(text.to_string());
+        serde_json::Value::Array(items) => {
+            let mut parts: Vec<String> = Vec::new();
+            for item in items {
+                match item {
+                    serde_json::Value::String(s) => {
+                        if !s.trim().is_empty() {
+                            parts.push(s.to_string());
                         }
                     }
-                    _ => {}
+                    serde_json::Value::Object(obj) => {
+                        let subject = obj
+                            .get("subject")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim();
+                        let description = obj
+                            .get("description")
+                            .or_else(|| obj.get("text"))
+                            .or_else(|| obj.get("summary"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim();
+
+                        if !subject.is_empty() && !description.is_empty() {
+                            parts.push(format!("{subject}: {description}"));
+                        } else if !description.is_empty() {
+                            parts.push(description.to_string());
+                        } else if !subject.is_empty() {
+                            parts.push(subject.to_string());
+                        }
+                    }
+                    _ => {
+                        let flat = flatten_content(item);
+                        if !flat.trim().is_empty() {
+                            parts.push(flat);
+                        }
+                    }
                 }
             }
-            text_parts.join("\n")
+            parts.join("\n\n")
         }
         serde_json::Value::Object(obj) => obj
-            .get("text")
+            .get("description")
+            .or_else(|| obj.get("text"))
+            .or_else(|| obj.get("summary"))
+            .or_else(|| obj.get("subject"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
@@ -1009,6 +1080,24 @@ mod tests {
     }
 
     #[test]
+    fn reader_falls_back_to_thoughts_when_content_empty() {
+        let session = read_gemini_json(
+            r#"{
+                "sessionId": "gmi-thoughts-fallback",
+                "messages": [
+                    {"type": "user", "content": "Q"},
+                    {"type": "gemini", "content": "", "thoughts": "Reasoned answer hidden in thoughts"}
+                ]
+            }"#,
+        );
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(
+            session.messages[1].content,
+            "Reasoned answer hidden in thoughts"
+        );
+    }
+
+    #[test]
     fn reader_extracts_tool_blocks_while_flattening_text() {
         let session = read_gemini_json(
             r#"{
@@ -1111,6 +1200,52 @@ mod tests {
         );
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[1].content, "Valid");
+    }
+
+    #[test]
+    fn reader_keeps_thoughts_only_messages() {
+        let session = read_gemini_json(
+            r#"{
+                "sessionId": "gmi-thoughts-only",
+                "messages": [
+                    {"type": "user", "content": "Q"},
+                    {"type": "model", "content": "", "thoughts": "Internal explanation"}
+                ]
+            }"#,
+        );
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[1].content, "Internal explanation");
+    }
+
+    #[test]
+    fn reader_extracts_structured_thoughts_array() {
+        let session = read_gemini_json(
+            r#"{
+                "sessionId": "gmi-thoughts-array",
+                "messages": [
+                    {"type": "user", "content": "Q"},
+                    {
+                        "type": "gemini",
+                        "content": "",
+                        "thoughts": [
+                            {"subject": "Plan", "description": "Investigate parser edge cases"},
+                            {"subject": "Result", "description": "Patched fallback extraction"}
+                        ]
+                    }
+                ]
+            }"#,
+        );
+        assert_eq!(session.messages.len(), 2);
+        assert!(
+            session.messages[1]
+                .content
+                .contains("Plan: Investigate parser edge cases")
+        );
+        assert!(
+            session.messages[1]
+                .content
+                .contains("Result: Patched fallback extraction")
+        );
     }
 
     #[test]

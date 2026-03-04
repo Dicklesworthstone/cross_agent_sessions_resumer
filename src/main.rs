@@ -640,11 +640,57 @@ fn cmd_list(
         count
     }
 
+    fn factory_tool_uses_from_file(path: &Path) -> usize {
+        let Ok(file) = std::fs::File::open(path) else {
+            return 0;
+        };
+        let reader = BufReader::new(file);
+        let mut count: usize = 0;
+
+        for line in reader.lines().map_while(Result::ok) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(entry) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            if entry.get("type").and_then(|v| v.as_str()) != Some("message") {
+                continue;
+            }
+            if let Some(content) = entry.pointer("/message/content").and_then(|v| v.as_array()) {
+                count = count.saturating_add(
+                    content
+                        .iter()
+                        .filter(|block| {
+                            matches!(
+                                block.get("type").and_then(|v| v.as_str()),
+                                Some("tool_use")
+                                    | Some("tool_call")
+                                    | Some("function_call")
+                                    | Some("custom_tool_call")
+                            )
+                        })
+                        .count(),
+                );
+            }
+            if let Some(tool_calls) = entry
+                .pointer("/message/toolCalls")
+                .and_then(|v| v.as_array())
+            {
+                count = count.saturating_add(tool_calls.len());
+            }
+        }
+
+        count
+    }
+
     fn tool_uses_from_source_file(provider_slug: &str, path: &Path) -> usize {
         match provider_slug {
             "codex" => codex_tool_uses_from_file(path),
             "gemini" => gemini_tool_uses_from_file(path),
             "claude-code" => claude_tool_uses_from_file(path),
+            "factory" => factory_tool_uses_from_file(path),
             _ => 0,
         }
     }
@@ -734,7 +780,12 @@ fn cmd_list(
             }
 
             if msg.role == casr::model::MessageRole::Assistant {
-                let char_count = msg.content.chars().count();
+                let char_count = msg.content.chars().count().saturating_add(
+                    msg.tool_results
+                        .iter()
+                        .map(|result| result.content.chars().count())
+                        .sum::<usize>(),
+                );
                 if char_count > 0 {
                     assistant_chars_total = assistant_chars_total.saturating_add(char_count);
                     assistant_responses = assistant_responses.saturating_add(1);

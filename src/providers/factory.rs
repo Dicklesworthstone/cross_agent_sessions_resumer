@@ -25,8 +25,8 @@ use tracing::{debug, info, trace};
 
 use crate::discovery::DetectionResult;
 use crate::model::{
-    CanonicalMessage, CanonicalSession, MessageRole, flatten_content, normalize_role,
-    parse_timestamp, reindex_messages, truncate_title,
+    CanonicalMessage, CanonicalSession, MessageRole, ToolCall, ToolResult, flatten_content,
+    normalize_role, parse_timestamp, reindex_messages, truncate_title,
 };
 use crate::providers::{Provider, WriteOptions, WrittenSession};
 
@@ -64,6 +64,168 @@ impl Factory {
     fn encode_workspace_slug(path: &Path) -> String {
         let s = path.to_string_lossy();
         s.replace('/', "-")
+    }
+
+    fn extract_tool_calls(
+        message_obj: Option<&serde_json::Value>,
+        content_value: Option<&serde_json::Value>,
+    ) -> Vec<ToolCall> {
+        let mut calls: Vec<ToolCall> = Vec::new();
+
+        if let Some(serde_json::Value::Array(blocks)) = content_value {
+            for block in blocks {
+                let Some(obj) = block.as_object() else {
+                    continue;
+                };
+                let Some(block_type) = obj.get("type").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !matches!(
+                    block_type,
+                    "tool_use" | "tool_call" | "function_call" | "custom_tool_call"
+                ) {
+                    continue;
+                }
+                let arguments = obj
+                    .get("input")
+                    .or_else(|| obj.get("arguments"))
+                    .or_else(|| obj.get("args"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                calls.push(ToolCall {
+                    id: obj
+                        .get("id")
+                        .or_else(|| obj.get("call_id"))
+                        .or_else(|| obj.get("tool_use_id"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    name: obj
+                        .get("name")
+                        .or_else(|| obj.get("function").and_then(|v| v.get("name")))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    arguments,
+                });
+            }
+        }
+
+        if let Some(tool_calls) = message_obj
+            .and_then(|m| m.get("toolCalls"))
+            .and_then(|v| v.as_array())
+        {
+            for call in tool_calls {
+                let Some(obj) = call.as_object() else {
+                    continue;
+                };
+                calls.push(ToolCall {
+                    id: obj
+                        .get("id")
+                        .or_else(|| obj.get("call_id"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    name: obj
+                        .get("name")
+                        .or_else(|| obj.get("function").and_then(|v| v.get("name")))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    arguments: obj
+                        .get("input")
+                        .or_else(|| obj.get("arguments"))
+                        .or_else(|| obj.get("args"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                });
+            }
+        }
+
+        calls
+    }
+
+    fn extract_tool_results(
+        message_obj: Option<&serde_json::Value>,
+        content_value: Option<&serde_json::Value>,
+    ) -> Vec<ToolResult> {
+        let mut results: Vec<ToolResult> = Vec::new();
+
+        if let Some(serde_json::Value::Array(blocks)) = content_value {
+            for block in blocks {
+                let Some(obj) = block.as_object() else {
+                    continue;
+                };
+                let Some(block_type) = obj.get("type").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !matches!(
+                    block_type,
+                    "tool_result" | "function_call_output" | "custom_tool_call_output"
+                ) {
+                    continue;
+                }
+                let result_content = obj
+                    .get("content")
+                    .or_else(|| obj.get("output"))
+                    .or_else(|| obj.get("result"))
+                    .map(flatten_content)
+                    .unwrap_or_default();
+                let is_error = obj
+                    .get("is_error")
+                    .and_then(|v| v.as_bool())
+                    .or_else(|| {
+                        obj.get("status")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == "error")
+                    })
+                    .unwrap_or(false);
+                results.push(ToolResult {
+                    call_id: obj
+                        .get("tool_use_id")
+                        .or_else(|| obj.get("call_id"))
+                        .or_else(|| obj.get("id"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    content: result_content,
+                    is_error,
+                });
+            }
+        }
+
+        if let Some(tool_results) = message_obj
+            .and_then(|m| m.get("toolResults"))
+            .and_then(|v| v.as_array())
+        {
+            for result in tool_results {
+                let Some(obj) = result.as_object() else {
+                    continue;
+                };
+                results.push(ToolResult {
+                    call_id: obj
+                        .get("tool_use_id")
+                        .or_else(|| obj.get("call_id"))
+                        .or_else(|| obj.get("id"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    content: obj
+                        .get("content")
+                        .or_else(|| obj.get("output"))
+                        .or_else(|| obj.get("result"))
+                        .map(flatten_content)
+                        .unwrap_or_default(),
+                    is_error: obj
+                        .get("is_error")
+                        .and_then(|v| v.as_bool())
+                        .or_else(|| {
+                            obj.get("status")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s == "error")
+                        })
+                        .unwrap_or(false),
+                });
+            }
+        }
+
+        results
     }
 }
 
@@ -194,18 +356,18 @@ impl Provider for Factory {
                         .unwrap_or("unknown");
                     let role = normalize_role(role_str);
 
-                    let content = val
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .map(flatten_content)
-                        .unwrap_or_default();
+                    let message_obj = val.get("message");
+                    let content_value = message_obj.and_then(|m| m.get("content"));
+                    let content = content_value.map(flatten_content).unwrap_or_default();
+                    let tool_calls = Self::extract_tool_calls(message_obj, content_value);
+                    let tool_results = Self::extract_tool_results(message_obj, content_value);
 
-                    if content.trim().is_empty() {
+                    if content.trim().is_empty() && tool_calls.is_empty() && tool_results.is_empty()
+                    {
                         continue;
                     }
 
-                    let author = val
-                        .get("message")
+                    let author = message_obj
                         .and_then(|m| m.get("model"))
                         .and_then(|v| v.as_str())
                         .map(String::from);
@@ -216,8 +378,8 @@ impl Provider for Factory {
                         content,
                         timestamp: ts,
                         author,
-                        tool_calls: vec![],
-                        tool_results: vec![],
+                        tool_calls,
+                        tool_results,
                         extra: val,
                     });
                 }
@@ -571,6 +733,46 @@ mod tests {
         );
         assert!(session.messages[0].content.contains("Part 1"));
         assert!(session.messages[0].content.contains("Part 2"));
+    }
+
+    #[test]
+    fn reader_extracts_tool_calls_and_tool_results_from_content_blocks() {
+        let session = read_factory(
+            "-test",
+            "tool-blocks",
+            &[
+                r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Working"},{"type":"tool_use","id":"toolu_1","name":"Execute","input":{"command":"pwd"}}]}}"#,
+                r#"{"type":"message","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#,
+            ],
+        );
+
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].tool_calls.len(), 1);
+        assert_eq!(session.messages[0].tool_calls[0].name, "Execute");
+        assert_eq!(session.messages[1].tool_results.len(), 1);
+        assert_eq!(
+            session.messages[1].tool_results[0].call_id.as_deref(),
+            Some("toolu_1")
+        );
+        assert_eq!(session.messages[1].tool_results[0].content, "ok");
+    }
+
+    #[test]
+    fn reader_extracts_tool_calls_from_message_level_tool_calls() {
+        let session = read_factory(
+            "-test",
+            "tool-calls-array",
+            &[
+                r#"{"type":"message","message":{"role":"assistant","content":"Running","toolCalls":[{"id":"call_1","name":"Grep","args":{"pattern":"tool"}}]}}"#,
+            ],
+        );
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].tool_calls.len(), 1);
+        assert_eq!(session.messages[0].tool_calls[0].name, "Grep");
+        assert_eq!(
+            session.messages[0].tool_calls[0].id.as_deref(),
+            Some("call_1")
+        );
     }
 
     #[test]

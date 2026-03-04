@@ -560,8 +560,10 @@ impl Codex {
 
                         let content_val = p.get("content");
                         let text = codex_extract_text_content(content_val);
-                        let tool_calls = codex_extract_tool_calls(content_val);
-                        let tool_results = codex_extract_tool_results(content_val);
+                        let mut tool_calls = codex_extract_tool_calls(content_val);
+                        tool_calls.extend(codex_extract_payload_tool_calls(p));
+                        let mut tool_results = codex_extract_tool_results(content_val);
+                        tool_results.extend(codex_extract_payload_tool_results(p));
 
                         if text.trim().is_empty()
                             && tool_calls.is_empty()
@@ -904,6 +906,92 @@ fn codex_extract_tool_results(content: Option<&serde_json::Value>) -> Vec<ToolRe
         .collect()
 }
 
+fn codex_extract_payload_tool_calls(payload: &serde_json::Value) -> Vec<ToolCall> {
+    let payload_type = payload
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if !matches!(payload_type, "function_call" | "custom_tool_call") {
+        return vec![];
+    }
+
+    let arguments = payload
+        .get("arguments")
+        .or_else(|| payload.get("input"))
+        .or_else(|| payload.get("args"))
+        .map(codex_parse_arguments_value)
+        .unwrap_or(serde_json::Value::Null);
+
+    vec![ToolCall {
+        id: payload
+            .get("call_id")
+            .or_else(|| payload.get("id"))
+            .or_else(|| payload.get("tool_use_id"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        name: payload
+            .get("name")
+            .or_else(|| payload.pointer("/function/name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        arguments,
+    }]
+}
+
+fn codex_extract_payload_tool_results(payload: &serde_json::Value) -> Vec<ToolResult> {
+    let payload_type = payload
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if !matches!(
+        payload_type,
+        "function_call_output" | "custom_tool_call_output"
+    ) {
+        return vec![];
+    }
+
+    let content = payload
+        .get("output")
+        .or_else(|| payload.get("content"))
+        .or_else(|| payload.get("result"))
+        .map(flatten_content)
+        .unwrap_or_default();
+    let is_error = payload
+        .get("is_error")
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            payload
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|status| status == "error")
+        })
+        .unwrap_or(false);
+
+    vec![ToolResult {
+        call_id: payload
+            .get("call_id")
+            .or_else(|| payload.get("tool_use_id"))
+            .or_else(|| payload.get("id"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        content,
+        is_error,
+    }]
+}
+
+fn codex_parse_arguments_value(value: &serde_json::Value) -> serde_json::Value {
+    if let Some(text) = value.as_str() {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
+            parsed
+        } else {
+            serde_json::Value::String(text.to_string())
+        }
+    } else {
+        value.clone()
+    }
+}
+
 /// Extract `session_meta.payload.id` from a Codex rollout file.
 fn session_meta_id(path: &Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
@@ -1057,6 +1145,67 @@ mod tests {
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.messages[0].tool_results.len(), 1);
         assert_eq!(session.messages[0].tool_results[0].content, "lint clean");
+    }
+
+    #[test]
+    fn payload_function_call_is_parsed_as_tool_call() {
+        let file_text = serde_json::to_string(&json!({
+            "type": "response_item",
+            "timestamp": 1700000000.0,
+            "payload": {
+                "type": "function_call",
+                "role": "assistant",
+                "call_id": "call-42",
+                "name": "Read",
+                "arguments": "{\"file_path\":\"src/main.rs\"}"
+            }
+        }))
+        .expect("serializable test envelope");
+
+        let provider = Codex;
+        let session = provider
+            .read_jsonl(Path::new("/tmp/rollout-fc.jsonl"), &file_text)
+            .expect("Codex JSONL reader should parse payload-level function_call");
+
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].tool_calls.len(), 1);
+        assert_eq!(session.messages[0].tool_calls[0].name, "Read");
+        assert_eq!(
+            session.messages[0].tool_calls[0].id.as_deref(),
+            Some("call-42")
+        );
+        assert_eq!(
+            session.messages[0].tool_calls[0].arguments["file_path"],
+            "src/main.rs"
+        );
+    }
+
+    #[test]
+    fn payload_function_call_output_is_parsed_as_tool_result() {
+        let file_text = serde_json::to_string(&json!({
+            "type": "response_item",
+            "timestamp": 1700000000.0,
+            "payload": {
+                "type": "function_call_output",
+                "role": "assistant",
+                "call_id": "call-42",
+                "output": "done"
+            }
+        }))
+        .expect("serializable test envelope");
+
+        let provider = Codex;
+        let session = provider
+            .read_jsonl(Path::new("/tmp/rollout-fco.jsonl"), &file_text)
+            .expect("Codex JSONL reader should parse payload-level function_call_output");
+
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].tool_results.len(), 1);
+        assert_eq!(
+            session.messages[0].tool_results[0].call_id.as_deref(),
+            Some("call-42")
+        );
+        assert_eq!(session.messages[0].tool_results[0].content, "done");
     }
 
     #[test]
