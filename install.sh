@@ -120,11 +120,22 @@ err() {
 run_with_spinner() {
   local title="$1"
   shift
+  local exit_code=0
   if [ "$HAS_GUM" -eq 1 ] && [ "$NO_GUM" -eq 0 ] && [ "$QUIET" -eq 0 ]; then
-    gum spin --spinner dot --title "$title" -- "$@"
+    local err_log="$TMP/gum-error.log"
+    # Execute the command inside a bash subshell to securely pipe its output to a log file
+    # while preserving the exact argument vector ($@) without stringification loss.
+    if ! gum spin --spinner dot --title "$title" -- bash -c '"$@" > "$0" 2>&1' "$err_log" "$@"; then
+      exit_code=1
+    fi
+    if [ "$exit_code" -ne 0 ]; then
+      err "Command failed: $*"
+      [ -f "$err_log" ] && cat "$err_log" >&2
+      return $exit_code
+    fi
   else
     info "$title"
-    "$@"
+    "$@" || return $?
   fi
 }
 

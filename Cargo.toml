@@ -1,9 +1,9 @@
 [package]
 name = "casr"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Cross Agent Session Resumer — resume AI coding sessions across providers"
-license = "MIT"
+license-file = "LICENSE"
 repository = "https://github.com/Dicklesworthstone/cross_agent_session_resumer"
 
 [dependencies]
