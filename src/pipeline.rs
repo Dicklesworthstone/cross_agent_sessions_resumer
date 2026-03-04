@@ -801,22 +801,24 @@ pub fn restore_backup(outcome: &AtomicWriteOutcome, provider_slug: &str) -> Resu
 
 /// Find an available backup path, deduplicating with `.bak`, `.bak.1`, `.bak.2`, etc.
 fn find_backup_path(target: &Path) -> PathBuf {
-    let base = target.as_os_str().to_string_lossy();
-    let bak = PathBuf::from(format!("{base}.bak"));
+    let mut filename = target.file_name().unwrap_or_default().to_os_string();
+    filename.push(".bak");
+    let bak = target.with_file_name(&filename);
     if !bak.exists() {
         return bak;
     }
     for i in 1..100 {
-        let numbered = PathBuf::from(format!("{base}.bak.{i}"));
-        if !numbered.exists() {
-            return numbered;
+        let mut numbered = filename.clone();
+        numbered.push(format!(".{i}"));
+        let numbered_path = target.with_file_name(numbered);
+        if !numbered_path.exists() {
+            return numbered_path;
         }
     }
     // Fallback: use random suffix.
-    PathBuf::from(format!(
-        "{base}.bak.{}",
-        uuid::Uuid::new_v4().as_hyphenated()
-    ))
+    let mut random = filename;
+    random.push(format!(".{}", uuid::Uuid::new_v4().as_hyphenated()));
+    target.with_file_name(random)
 }
 
 #[cfg(test)]
