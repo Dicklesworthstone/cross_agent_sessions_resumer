@@ -97,7 +97,7 @@ claude --resume <new-session-id>
 | Vibe | `vib` | Yes | Yes | `vibe --resume <session-id>` |
 | Factory | `fac` | Yes | Yes | `factory --resume <session-id>` |
 | OpenClaw | `ocl` | Yes | Yes | `openclaw --resume <session-id>` |
-| Pi-Agent | `pi` | Yes | Yes | `pi-agent --resume <session-id>` |
+| Pi-Agent | `pi` | Yes | Yes | `pi --session <path-to-session.jsonl>` |
 
 Notes:
 - Initial core focus is Claude Code, Codex, and Gemini CLI.
