@@ -429,9 +429,14 @@ impl Provider for PiAgent {
 
         // Messages.
         for msg in &session.messages {
-            // Skip messages with empty content to match read_session filtering,
-            // preventing message count mismatch on round-trip.
-            if msg.content.trim().is_empty() && msg.tool_calls.is_empty() {
+            // Skip messages that would produce empty content on read-back.
+            // Pi reader skips entries where content.trim().is_empty(), so
+            // we must ensure every written message survives the round-trip.
+            // Tool-result-only messages (empty content, no tool_calls, but
+            // with tool_results) get their content synthesized below.
+            let has_tool_data =
+                !msg.tool_calls.is_empty() || !msg.tool_results.is_empty();
+            if msg.content.trim().is_empty() && !has_tool_data {
                 continue;
             }
 
@@ -443,13 +448,35 @@ impl Provider for PiAgent {
                 MessageRole::Other(r) => r.as_str(),
             };
 
+            // For tool-result-only messages (empty content, no tool_calls),
+            // synthesize readable content from the tool results so the Pi
+            // reader won't skip the message on read-back.
+            let effective_content = if msg.content.trim().is_empty()
+                && msg.tool_calls.is_empty()
+                && !msg.tool_results.is_empty()
+            {
+                msg.tool_results
+                    .iter()
+                    .map(|tr| {
+                        if tr.is_error {
+                            format!("[Tool Error] {}", tr.content)
+                        } else {
+                            format!("[Tool Output] {}", tr.content)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                msg.content.clone()
+            };
+
             // Build content: plain string for simple, array for tool calls.
             let content: serde_json::Value = if msg.tool_calls.is_empty() {
-                serde_json::Value::String(msg.content.clone())
+                serde_json::Value::String(effective_content.clone())
             } else {
                 let mut blocks = vec![serde_json::json!({
                     "type": "text",
-                    "text": msg.content,
+                    "text": effective_content,
                 })];
                 for tc in &msg.tool_calls {
                     blocks.push(serde_json::json!({
@@ -469,20 +496,48 @@ impl Provider for PiAgent {
                 inner["model"] = serde_json::Value::String(author.clone());
             }
 
-            // Add usage field with proper structure to prevent TypeError in Pi
-            // when accessing usage.input. Pi-Agent stores usage inside the
-            // nested "message" object, so check both envelope and inner levels.
+            // Add usage field with the full structure Pi expects.
+            // Pi's footer.js sums: usage.input, usage.output, usage.cacheRead,
+            // usage.cacheWrite, and usage.cost.total — all must be present to
+            // avoid TypeError crashes.
             let usage = msg
                 .extra
                 .get("message")
                 .and_then(|m| m.get("usage"))
                 .or_else(|| msg.extra.get("usage"))
                 .cloned()
+                .map(|mut u| {
+                    // Ensure all required fields exist even if the source
+                    // usage object is incomplete.
+                    let obj = u.as_object_mut();
+                    if let Some(map) = obj {
+                        for key in &["input", "output", "cacheRead", "cacheWrite", "totalTokens"] {
+                            map.entry((*key).to_string())
+                                .or_insert(serde_json::Value::Number(0.into()));
+                        }
+                        map.entry("cost".to_string()).or_insert_with(|| {
+                            serde_json::json!({
+                                "input": 0, "output": 0,
+                                "cacheRead": 0, "cacheWrite": 0, "total": 0
+                            })
+                        });
+                    }
+                    u
+                })
                 .unwrap_or_else(|| {
                     serde_json::json!({
                         "input": 0,
                         "output": 0,
-                        "total": 0
+                        "cacheRead": 0,
+                        "cacheWrite": 0,
+                        "totalTokens": 0,
+                        "cost": {
+                            "input": 0,
+                            "output": 0,
+                            "cacheRead": 0,
+                            "cacheWrite": 0,
+                            "total": 0
+                        }
                     })
                 });
             inner["usage"] = usage;
@@ -525,7 +580,10 @@ impl Provider for PiAgent {
     }
 
     fn resume_command(&self, session_id: &str) -> String {
-        format!("pi-agent --resume {session_id}")
+        let home = Self::home_dir();
+        let sessions_dir = home.join("sessions");
+        let session_path = sessions_dir.join(format!("{session_id}.jsonl"));
+        format!("pi --session {}", session_path.display())
     }
 }
 
@@ -947,10 +1005,9 @@ mod tests {
     #[test]
     fn writer_resume_command() {
         let provider = PiAgent;
-        assert_eq!(
-            provider.resume_command("my-session"),
-            "pi-agent --resume my-session"
-        );
+        let cmd = provider.resume_command("my-session");
+        assert!(cmd.starts_with("pi --session "), "got: {cmd}");
+        assert!(cmd.ends_with("/sessions/my-session.jsonl"), "got: {cmd}");
     }
 
     // -----------------------------------------------------------------------
